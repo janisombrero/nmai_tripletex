@@ -1,0 +1,75 @@
+{
+  "task_scores": {
+    "create_employee": {
+      "tier": 1,
+      "attempts": 2,
+      "best_score": 0.0,
+      "status": "failing",
+      "last_error": "[{'field': 'email', 'message': 'Må angis for Tripletex-brukere.', 'path': None, 'rootId': None}]"
+    },
+    "create_travel_expense": {
+      "tier": 1,
+      "attempts": 1,
+      "best_score": 0.5,
+      "status": "partial",
+      "last_error": null
+    },
+    "create_voucher": {
+      "tier": 2,
+      "attempts": 1,
+      "best_score": 0.5,
+      "status": "partial",
+      "last_error": null
+    }
+  },
+  "known_failures": {
+    "general": {
+      "findings": [
+        {
+          "finding": "When a task fails with missing data, check if the prompt mentions an attachment (PDF/CSV) and ensure all required fields from that attachment are explicitly defined as (optional) in the agent.py schema for that task type. Gemini will silently drop extracted data if the schema doesn't ask for it.",
+          "timestamp": "2026-03-21T15:41:22.398561"
+        }
+      ],
+      "status": "unresolved"
+    }
+  },
+  "prompts_seen": [
+    {
+      "task_type": "create_employee",
+      "prompt": "Voce recebeu um contrato de trabalho (ver PDF anexo). Crie o funcionario no Tripletex com todos os detalhes do contrato: numero de identidade nacional, data de nascimento, departamento, codigo de ocupacao, salario, percentagem de emprego e data de inicio.",
+      "language": "en",
+      "result": "failed",
+      "timestamp": "2026-03-21T12:24:59.744431"
+    },
+    {
+      "task_type": "create_travel_expense",
+      "prompt": "Erfassen Sie eine Reisekostenabrechnung für Elias Hoffmann (elias.hoffmann@example.org) für \"Kundenbesuch Trondheim\". Die Reise dauerte 5 Tage mit Tagegeld (Tagessatz 800 NOK). Auslagen: Flugticket 6300 NOK und Taxi 250 NOK.",
+      "language": "de",
+      "result": "success",
+      "timestamp": "2026-03-21T14:52:30.765072"
+    },
+    {
+      "task_type": "create_voucher",
+      "prompt": "Recebemos a fatura INV-2026-4855 do fornecedor Solmar Lda (org. nº 972752843) no valor de 62600 NOK com IVA incluído. O montante refere-se a serviços de escritório (conta 6860). Registe a fatura do fornecedor com o IVA dedutível correto (25 %).",
+      "language": "pt",
+      "result": "success",
+      "timestamp": "2026-03-21T15:16:44.722334"
+    },
+    {
+      "task_type": "create_employee",
+      "prompt": "Voce recebeu uma carta de oferta (ver PDF anexo) para um novo funcionario. Complete a integracao: crie o funcionario, atribua o departamento correto, configure os detalhes de emprego com percentagem e salario anual, e configure as horas de trabalho padrao.",
+      "language": "pt",
+      "result": "failed",
+      "timestamp": "2026-03-21T16:56:54.413183"
+    }
+  ],
+  "submission_count": {
+    "used_today": 16,
+    "daily_limit": 300
+  },
+  "deployment": {
+    "cloud_run_url": "https://nmiai-247841323009.europe-north1.run.app",
+    "project": "ainm26osl-792"
+  },
+  "last_updated": "2026-03-21T16:56:54.413236"
+}

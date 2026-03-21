@@ -1,0 +1,8 @@
+.env
+*.log
+server.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+openapi_sandbox.json

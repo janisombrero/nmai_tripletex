@@ -1,0 +1,11 @@
+# Always include these files for competition context
+!MEMORY.md
+!competition_state.json
+
+# Exclude large/generated files
+openapi_sandbox.json
+scorer_logs.txt
+predictions.txt
+__pycache__/
+*.pyc
+*.log

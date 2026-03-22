@@ -31,24 +31,19 @@ class TripletexClient:
 
     @staticmethod
     def _strip_voucher_postings(endpoint: str, body: dict) -> dict:
-        """Remove system-generated fields from voucher postings before sending to Tripletex.
+        """Normalise voucher postings before sending to Tripletex.
 
-        Tripletex rejects POST/PUT /ledger/voucher with 422 if postings contain
-        fields like 'row' or 'guiRow' (system-generated values it manages internally).
-        Stripping at the HTTP layer is a backstop that works regardless of which
-        handler built the postings.
+        Tripletex requires 'row' to start at 1 for user-created postings (row=0 is
+        reserved for system-generated entries). We strip guiRow (never needed) and
+        re-assign row numbers sequentially starting from 1.
         """
-        logger.info("STRIP called for %s", endpoint)
-        if "/ledger/voucher" in endpoint and isinstance(body, dict) and "postings" in body:
-            strip = {"row", "guiRow"}
-            for posting in body.get("postings", []):
+        if "/ledger/voucher" in endpoint and not any(
+            x in endpoint for x in ["/:sendToLedger", "/:sendToInbox", "/attachment", "/pdf"]
+        ) and isinstance(body, dict) and "postings" in body:
+            for i, posting in enumerate(body.get("postings", []), start=1):
                 if isinstance(posting, dict):
-                    before = list(posting.keys())
-                    for key in strip:
-                        posting.pop(key, None)
-                    after = list(posting.keys())
-                    if before != after:
-                        logger.info("STRIP_DEBUG: posting before=%s after=%s", before, after)
+                    posting.pop("guiRow", None)
+                    posting["row"] = i
         return body
 
     def post(self, endpoint: str, json: dict = None, params: dict = None):

@@ -115,6 +115,20 @@ class TaskHandler:
         except (ValueError, TypeError):
             return default
 
+    def _send_voucher_to_ledger(self, vid: int) -> bool:
+        """PUT /:sendToLedger for a voucher. Returns True if approved or already posted."""
+        app_st, app_data = self.client.put(f"/ledger/voucher/{vid}/:sendToLedger")
+        if app_st in (200, 201, 204):
+            logger.info("Voucher %s sent to ledger", vid)
+            return True
+        # Sandbox auto-approves new vouchers; sendToLedger then returns 422 "already posted"
+        msg = str(app_data)
+        if app_st == 422 and ("bokf" in msg.lower() or "kan ikke sendes" in msg.lower()):
+            logger.info("Voucher %s already posted (auto-approved by Tripletex)", vid)
+            return True
+        logger.warning("Voucher %s sendToLedger returned %s: %s", vid, app_st, msg[:120])
+        return False
+
     def _to_float(self, val, default=0.0):
         """Safely cast value to float, avoiding crashes on templates or None."""
         if val is None: return default
@@ -253,7 +267,7 @@ class TaskHandler:
         Fields stripped at posting level: row, guiRow, id, voucher.
         The 'id' key on the nested 'account' sub-object is intentionally preserved.
         """
-        _STRIP = {"row", "guiRow", "id", "voucher"}
+        _STRIP = {"id", "voucher"}  # row/guiRow are now assigned by tripletex.py HTTP layer
         for p in postings:
             if isinstance(p, dict):
                 for field in _STRIP:
@@ -283,6 +297,19 @@ class TaskHandler:
                 return internal_id
 
         logger.warning("Account number %s not found in ledger", key)
+        # Try fallback accounts for commonly missing chart-of-accounts numbers
+        _FALLBACKS = {
+            "1209": ["1210", "1200"],  # accumulated depreciation → asset cost account
+            "8700": ["8300"],           # tax expense → betalbar skatt
+            "1990": ["1500"],           # clearing/suspense → receivables
+            "2900": ["2960", "2940"],   # accrued salaries → other accrued costs
+        }
+        for fallback in _FALLBACKS.get(key, []):
+            fallback_id = self._find_account_id(fallback)
+            if fallback_id is not None:
+                logger.info("Account %s not found — using fallback %s (id=%s)", key, fallback, fallback_id)
+                self._account_id_cache[key] = fallback_id
+                return fallback_id
         self._account_id_cache[key] = None
         return None
 
@@ -1202,7 +1229,6 @@ class TaskHandler:
                 voucher_payload = {
                     "date": date,
                     "description": description,
-                    "voucherType": {"id": 1},
                     "postings": self._clean_postings(postings),
                 }
                 v_st, v_data = self.client.post("/ledger/voucher", json=voucher_payload)
@@ -1210,9 +1236,7 @@ class TaskHandler:
                     vid = self._to_int(v_data.get("value", {}).get("id"))
                     logger.info("Dimension voucher created id=%s", vid)
                     if vid:
-                        app_st, _ = self.client.put(f"/ledger/voucher/{vid}/:sendToLedger")
-                        if app_st in (200, 201, 204):
-                            logger.info("Dimension voucher %s approved", vid)
+                        self._send_voucher_to_ledger(vid)
                 else:
                     logger.warning("Dimension voucher create failed: %s", v_data)
 
@@ -1528,10 +1552,15 @@ class TaskHandler:
                 or acc_obj.get("number")
             )
 
+            # Track the original chart-of-accounts number (e.g. 2400, 2710) so we can
+            # do semantic checks AFTER the ID has been resolved to a large internal ID.
+            original_chart_num = None
+
             # If we have only a number (or the "id" looks like a chart-of-accounts
             # number rather than an internal ID — internal IDs are typically large),
             # resolve it via the ledger API.
             if acc_number and not acc_id:
+                original_chart_num = int(acc_number)
                 acc_id = self._find_account_id(acc_number)
                 if acc_id is None:
                     logger.warning(
@@ -1544,6 +1573,7 @@ class TaskHandler:
                 try:
                     maybe_num = int(acc_id)
                     if maybe_num <= 9999:
+                        original_chart_num = maybe_num
                         resolved = self._find_account_id(maybe_num)
                         if resolved is not None:
                             acc_id = resolved
@@ -1565,7 +1595,7 @@ class TaskHandler:
                 logger.warning("Skipping posting with unresolvable account (raw posting: %s)", p)
                 continue
 
-            if acc_id_int in SYSTEM_ACCOUNTS:
+            if original_chart_num in SYSTEM_ACCOUNTS:
                 continue
 
             amount = self._to_float(p.get("amount", 0))
@@ -1578,12 +1608,13 @@ class TaskHandler:
                 "description": p.get("description", description),
                 "date": normalize_date(p.get("date", date)),
             }
-            if acc_id_int == 2400 and supplier_id:
+            # Use original chart number (not resolved internal ID) for semantic checks
+            if original_chart_num == 2400 and supplier_id:
                 posting["supplier"] = {"id": self._to_int(supplier_id)}
 
-            if acc_id_int == 2400:
+            if original_chart_num == 2400:
                 has_2400 = True
-            if acc_id_int == 2710:
+            if original_chart_num == 2710:
                 has_2710 = True
             if amount > 0:
                 total_debit += amount
@@ -1649,7 +1680,7 @@ class TaskHandler:
         payload = {
             "date": normalize_date(date) or TODAY,
             "description": description,
-            "voucherType": {"id": self._to_int(fields.get("voucherTypeId", 1))},
+            **({"voucherType": {"id": self._to_int(fields["voucherTypeId"])}} if fields.get("voucherTypeId") else {}),
             "postings": self._clean_postings(postings),
         }
         if invoice_number:
@@ -1664,11 +1695,7 @@ class TaskHandler:
             # Approve the voucher so it moves from DRAFT to APPROVED/POSTED state.
             # This is required to pass the second scoring check on the competition platform.
             if vid:
-                app_st, app_data = self.client.put(f"/ledger/voucher/{vid}/:sendToLedger")
-                if app_st in (200, 201, 204):
-                    logger.info("Voucher %s approved successfully", vid)
-                else:
-                    logger.warning("Voucher approve returned %s: %s", app_st, str(app_data)[:120])
+                self._send_voucher_to_ledger(vid)
             return {"success": True, "message": f"Voucher created id={vid}", "id": vid}
         return {"success": False, "message": f"Failed to create voucher: {data}", "_needs_fallback": True}
 
@@ -2470,7 +2497,6 @@ class TaskHandler:
         payload = {
             "date": date,
             "description": description,
-            "voucherType": {"id": 1},
             "postings": postings,
         }
         v_st, v_data = self.client.post("/ledger/voucher", json=payload)
@@ -2479,11 +2505,7 @@ class TaskHandler:
 
         vid = self._to_int(v_data.get("value", {}).get("id"))
         if vid:
-            app_st, _ = self.client.put(f"/ledger/voucher/{vid}/:sendToLedger")
-            if app_st in (200, 201, 204):
-                logger.info("Payroll voucher %s approved", vid)
-            else:
-                logger.warning("Payroll voucher approve returned %s", app_st)
+            self._send_voucher_to_ledger(vid)
 
         logger.info("TASK_RESULT: type=run_payroll success=True id=%s (manual voucher)", vid)
         return {

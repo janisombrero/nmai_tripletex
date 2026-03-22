@@ -1604,30 +1604,38 @@ class TaskHandler:
                     vat_percent = self._to_float(fields.get("vatPercent") or 25)
                     vat_amount = round(total_debit * vat_percent / 100, 2)
                 if vat_amount:
-                    postings.append({
-                        "account": {"id": 2710},
-                        "amount": vat_amount,
-                        "amountCurrency": vat_amount,
-                        "currency": {"id": 1},
-                        "description": description,
-                        "date": normalize_date(date),
-                    })
-                    total_debit += vat_amount
-                    has_2710 = True
-                    logger.info("Auto-generated 2710 VAT debit posting: %.2f", vat_amount)
+                    vat_acc_id = self._find_account_id(2710)
+                    if vat_acc_id is None:
+                        logger.warning("Cannot resolve account 2710 — skipping auto-VAT posting")
+                    else:
+                        postings.append({
+                            "account": {"id": vat_acc_id},
+                            "amount": vat_amount,
+                            "amountCurrency": vat_amount,
+                            "currency": {"id": 1},
+                            "description": description,
+                            "date": normalize_date(date),
+                        })
+                        total_debit += vat_amount
+                        has_2710 = True
+                        logger.info("Auto-generated 2710 VAT debit posting: %.2f (acc_id=%s)", vat_amount, vat_acc_id)
 
         # Auto-generate 2400 AP credit when a supplier is known but no AP posting exists.
         if supplier_id and not has_2400 and total_debit:
-            postings.append({
-                "account": {"id": 2400},
-                "amount": -total_debit,
-                "amountCurrency": -total_debit,
-                "currency": {"id": 1},
-                "description": description,
-                "date": normalize_date(date),
-                "supplier": {"id": self._to_int(supplier_id)},
-            })
-            logger.info("Auto-generated 2400 AP credit posting: -%.2f", total_debit)
+            ap_acc_id = self._find_account_id(2400)
+            if ap_acc_id is None:
+                logger.warning("Cannot resolve account 2400 — skipping auto-AP posting")
+            else:
+                postings.append({
+                    "account": {"id": ap_acc_id},
+                    "amount": -total_debit,
+                    "amountCurrency": -total_debit,
+                    "currency": {"id": 1},
+                    "description": description,
+                    "date": normalize_date(date),
+                    "supplier": {"id": self._to_int(supplier_id)},
+                })
+                logger.info("Auto-generated 2400 AP credit posting: -%.2f (acc_id=%s)", total_debit, ap_acc_id)
 
         if not postings:
             return {"success": False, "message": "No manual posting rows (only system rows found)", "_needs_fallback": True}

@@ -602,6 +602,347 @@ def build_tests(payment_invoice_number, credit_note_invoice_id) -> list[dict]:
                 "Then create an activity named Analysis for this project."
             ),
         },
+        ```python
+{
+    "number": 401,
+    "name": "Portuguese Employee Creation from Contract PDF (Simulated Details)",
+    "prompt": "Voce recebeu um contrato de trabalho (ver PDF anexo). Crie o funcionario no Tripletex com todos os detalhes do contrato: numero de identidade nacional, data de nascimento, departamento, codigo de ocupacao, salario, percentagem de emprego e data de inicio.",
+    "before_fn":
+    def before_fn():
+        # Ensure department 'Marketing' exists for robust testing.
+        # The agent should ideally create it if it doesn't exist, but this ensures a clean state for verification.
+        r = sandbox_get("/department", name="Marketing")
+        departments = r.json().get("values", [,
+        ```python
+{
+    "number": 1001,
+    "name": "Create Employee - Portuguese Full Integration with PDF Context",
+    "prompt": "Voce recebeu uma carta de oferta (ver PDF anexo) para um novo funcionario. Complete a integracao: crie o funcionario, atribua o departamento correto, configure os detalhes de emprego com percentagem e salario anual, e configure as horas de trabalho padrao.",
+    "before_fn":
+        def before_create_employee_portuguese_full():
+            # Define expected employee details for cleanup and verification
+            expected_email = "maria.silva.test@example.org"
+            expected_department_name = "Sales" # Assuming agent maps 'departamento correto' to 'Sales'
+
+            # 1. Ensure 'Sales' department exists
+            r = sandbox_get("/department", name=expected_department_name)
+            departments = r.json().get("values", [,
+        ```python
+{
+    "number": 101,
+    "name": "Create Employee from Portuguese Contract",
+    "prompt": """Crie o funcionário João Silva no Tripletex com os seguintes detalhes do contrato:
+- Número de identidade nacional: 12345678901
+- Data de nascimento: 15 de maio de 1990
+- Departamento: Vendas
+- Código de ocupação: 2111
+- Salário: 50000 NOK
+- Percentagem de emprego: 100%
+- Data de início: 1 de julho de 2024
+- Email: joao.silva@example.org""",
+    "before_fn":
+        def before_fn_create_employee_pt():
+            # Clean up any existing employee with the same email from previous test runs
+            r = sandbox_get("/employee", email="joao.silva@example.org")
+            employees = r.json().get("values", [,
+        ```python
+{
+    "number": 1001,
+    "name": "Create Employee (Portuguese) from PDF - Full Integration",
+    "prompt": "Voce recebeu uma carta de oferta (ver PDF anexo) para um novo funcionario. Complete a integracao: crie o funcionario, atribua o departamento correto, configure os detalhes de emprego com percentagem e salario anual, e configure as horas de trabalho padrao.",
+    "files": {
+        "carta_oferta.pdf": """Offer Letter
+Date: 2024-01-15
+
+Dear Mr. Carlos Silva,
+
+We are pleased to offer you the position of Sales Representative at Tripletex.
+Your start date will be 2024-02-01.
+Your annual salary will be 600000 NOK.
+This is a full-time position (100% employment percentage), with standard working hours of 37.5 hours per week.
+You will be part of the Sales Department.
+Your work email will be carlos.silva@example.com.
+
+Sincerely,
+[Hiring Manager]"""
+    },
+    "before_fn":
+def before_fn_1001():
+    # Clean up existing employee if any to ensure a clean test environment
+    employee_email = "carlos.silva@example.com"
+    r_existing = sandbox_get("/employee", email=employee_email)
+    existing_employees = r_existing.json().get("values", [])
+    for emp in existing_employees:
+        # Assuming a DELETE endpoint or a specific POST action for deletion in the sandbox
+        try:
+            sandbox_post(f"/employee/{emp['id']}/delete")
+            print(f"Deleted existing employee: {emp['firstName']} {emp['lastName']} ({emp['id']})")
+        except Exception as e:
+            print(f"Could not delete existing employee {emp['id']}: {e}. This might cause test conflicts.")
+
+    # Ensure "Sales" department exists, create it if not
+    r = sandbox_get("/department", name="Sales")
+    departments = r.json().get("values", [])
+    if not departments:
+        print("Sales department not found, creating it.")
+        sandbox_post("/department", json={"name": "Sales"})
+        # Verify creation
+        r_check = sandbox_get("/department", name="Sales")
+        if not r_check.json().get("values"):
+            raise Exception("Failed to create Sales department in sandbox.")
+    else:
+        print("Sales department already exists.")
+,
+    "verify_fn":
+def verify_fn_1001():
+    employee_email = "carlos.silva@example.com"
+    r = sandbox_get("/employee", email=employee_email)
+    employees = r.json().get("values", [])
+
+    if not employees:
+        print(f"Verification failed: Employee with email {employee_email} not found.")
+        return False
+
+    employee = employees[0]
+
+    # Verify basic employee details
+    if not (employee.get("firstName") == "Carlos" and employee.get("lastName") == "Silva"):
+        print(f"Verification failed: Employee name mismatch. Expected Carlos Silva, got {employee.get('firstName')} {employee.get('lastName')}")
+        return False
+    if not (employee.get("email") == employee_email):
+        print(f"Verification failed: Employee email mismatch. Expected {employee_email}, got {employee.get('email')}")
+        return False
+
+    # Verify employment details
+    if not (employee.get("annualSalary") == 600000):
+        print(f"Verification failed: Annual salary mismatch. Expected 600000, got {employee.get('annualSalary')}")
+        return False
+    if not (employee.get("employmentPercentage") == 100):
+        print(f"Verification failed: Employment percentage mismatch. Expected 100, got {employee.get('employmentPercentage')}")
+        return False
+
+    # Verify department assignment
+    r_deps = sandbox_get("/department", name="Sales")
+    departments = r_deps.json().get("values", [])
+    if not departments:
+        print("Verification failed: Sales department not found in sandbox (should have been created by before_fn).")
+        return False
+    sales_department_id = departments[0]["id"]
+
+    if not (employee.get("department") and employee["department"].get("id") == sales_department_id):
+        print(f"Verification failed: Department mismatch. Expected Sales (ID {sales_department_id}), got {employee.get('department')}")
+        return False
+
+    # Verify standard work hours
+    # Given the partial API, we check common field names for weekly work hours.
+    hours_set_correctly = False
+    for key in ["weeklyWorkHours", "standardWorkHours", "hoursPerWeek"]:
+        if employee.get(key) == 37.5:
+            hours_set_correctly = True
+            break
+    
+    if not hours_set_correctly:
+        print(f"Verification failed: Standard work hours mismatch. Expected 37.5 in fields like 'weeklyWorkHours', 'standardWorkHours', 'hoursPerWeek'. Found: {employee.get('weeklyWorkHours')}, {employee.get('standardWorkHours')}, {employee.get('hoursPerWeek')}")
+        return False
+
+    return True
+}
+    ])
+            if employees:
+                employee_id = employees[0]["id"]
+                print(f"Deleting existing employee with ID: {employee_id} and email: joao.silva@example.org")
+                # Assuming a delete endpoint exists, e.g., using a PUT with :delete action
+                # Or a POST to a specific delete action endpoint
+                sandbox_post(f"/employee/{employee_id}/:delete", {})
+            return True, "Setup complete"
+        ,
+    "verify_fn":
+        def verify_fn_create_employee_pt():
+            r = sandbox_get("/employee", email="joao.silva@example.org")
+            employees = r.json().get("values", [])
+
+            if not employees:
+                print("Verification failed: Employee 'João Silva' not found.")
+                return False
+
+            employee = employees[0]
+
+            # Verify core employee details
+            if not (employee.get("firstName") == "João" and
+                    employee.get("lastName") == "Silva" and
+                    employee.get("email") == "joao.silva@example.org" and
+                    employee.get("dateOfBirth") == "1990-05-15" and
+                    employee.get("startDate") == "2024-07-01" and
+                    employee.get("employmentPercentage") == 100 and
+                    employee.get("salary") == 50000 and
+                    employee.get("nationalIdentityNumber") == "12345678901"):
+                print(f"Verification failed: Mismatch in core employee details for João Silva.")
+                print(f"Expected: {{'firstName': 'João', 'lastName': 'Silva', 'email': 'joao.silva@example.org', 'dateOfBirth': '1990-05-15', 'startDate': '2024-07-01', 'employmentPercentage': 100, 'salary': 50000, 'nationalIdentityNumber': '12345678901'}}")
+                print(f"Actual: {employee}")
+                return False
+
+            # Verify department
+            department = employee.get("department")
+            if not (department and department.get("name") == "Vendas"):
+                print(f"Verification failed: Department mismatch for João Silva. Expected 'Vendas', got {department.get('name') if department else 'None'}.")
+                return False
+
+            # Verify occupation
+            occupation = employee.get("occupation")
+            if not (occupation and occupation.get("code") == "2111"):
+                print(f"Verification failed: Occupation code mismatch for João Silva. Expected '2111', got {occupation.get('code') if occupation else 'None'}.")
+                return False
+
+            print("Verification successful: Employee 'João Silva' created with all specified details.")
+            return True
+        ,
+}
+    ])
+            if not departments:
+                print(f"Creating '{expected_department_name}' department...")
+                r = sandbox_post("/department", body={"name": expected_department_name})
+                if r.status_code != 201:
+                    print(f"Failed to create '{expected_department_name}' department: {r.status_code} {r.text}")
+                    raise Exception(f"Failed to create '{expected_department_name}' department")
+                print(f"Created '{expected_department_name}' department.")
+            else:
+                print(f"'{expected_department_name}' department already exists.")
+
+            # 2. Clean up any existing employee with the test email to ensure a fresh test
+            r = sandbox_get("/employee", email=expected_email)
+            employees = r.json().get("values", [])
+            for emp in employees:
+                print(f"Deleting existing test employee: ID {emp['id']}, Email {emp['email']}")
+                sandbox_delete(f"/employee/{emp['id']}")
+            print("Pre-test setup complete.")
+        ,
+    "verify_fn":
+        def verify_employee_portuguese_integration():
+            # These values are assumed to be extracted by the agent from the (simulated) PDF
+            expected_first_name = "Maria"
+            expected_last_name = "Silva"
+            expected_email = "maria.silva.test@example.org"
+            expected_department_name = "Sales" # Agent is expected to assign to this department
+            expected_employment_percentage = 100.0 # 'full-time' or similar from PDF
+            expected_annual_salary = 600000.0 # Example annual salary in NOK
+            expected_standard_working_hours_per_week = 37.5 # Example standard working hours
+
+            print(f"Verifying employee with email: {expected_email}")
+            # 1. Find the created employee by email
+            r = sandbox_get("/employee", email=expected_email)
+            employees = r.json().get("values", [])
+
+            if not employees:
+                print(f"Verification failed: Employee with email '{expected_email}' not found.")
+                return False
+            if len(employees) > 1:
+                print(f"Verification warning: Found multiple employees with email '{expected_email}'. Checking the first one.")
+
+            employee = employees[0]
+
+            # 2. Verify basic employee details
+            if employee.get("firstName") != expected_first_name:
+                print(f"Verification failed: Expected first name '{expected_first_name}', got '{employee.get('firstName')}'")
+                return False
+            if employee.get("lastName") != expected_last_name:
+                print(f"Verification failed: Expected last name '{expected_last_name}', got '{employee.get('lastName')}'")
+                return False
+            if employee.get("email") != expected_email:
+                print(f"Verification failed: Expected email '{expected_email}', got '{employee.get('email')}'")
+                return False
+
+            # 3. Verify department assignment
+            department = employee.get("department")
+            if not department or department.get("name") != expected_department_name:
+                print(f"Verification failed: Expected department name '{expected_department_name}', got '{department.get('name') if department else 'None'}'")
+                return False
+
+            # 4. Verify employment details: percentage and annual salary
+            if employee.get("employmentPercentage") != expected_employment_percentage:
+                print(f"Verification failed: Expected employment percentage {expected_employment_percentage}, got {employee.get('employmentPercentage')}")
+                return False
+            if employee.get("annualSalary") != expected_annual_salary:
+                print(f"Verification failed: Expected annual salary {expected_annual_salary}, got {employee.get('annualSalary')}")
+                return False
+
+            # 5. Verify standard working hours
+            if employee.get("standardWorkingHoursPerWeek") != expected_standard_working_hours_per_week:
+                print(f"Verification failed: Expected standard working hours per week {expected_standard_working_hours_per_week}, got {employee.get('standardWorkingHoursPerWeek')}")
+                return False
+
+            print("Verification successful: Employee details match expectations.")
+            return True
+        ,
+}
+    ])
+        if not departments:
+            department_data = {"name": "Marketing", "isProjectDepartment": False}
+            post_r = sandbox_post("/department", json=department_data)
+            if post_r.status_code != 201: # Expect 201 Created for a new resource
+                print(f"Failed to create department 'Marketing': {post_r.status_code} - {post_r.text}")
+                return False
+        return True,
+    "verify_fn":
+    def verify_fn():
+        # Define the expected details that the agent should have extracted/generated from the (missing) PDF contract
+        # and used to create the employee.
+        expected_first_name = "Ana"
+        expected_last_name = "Pereira"
+        expected_email = "ana.pereira@example.com"
+        expected_national_identity_number = "987654321"
+        expected_date_of_birth = "1988-11-20"
+        expected_department_name = "Marketing"
+        expected_occupation_code = "2432" # Example: Marketing Manager
+        expected_monthly_salary = 65000.00
+        expected_employment_percentage = 100
+        expected_start_date = "2024-08-15"
+
+        # Search for the created employee by email
+        r = sandbox_get("/employee", email=expected_email)
+        employees = r.json().get("values", [])
+
+        if not employees:
+            print(f"Verify failed: Employee with email {expected_email} not found.")
+            return False
+
+        employee = employees[0]
+
+        # Verify basic employee details
+        if not (employee.get("firstName") == expected_first_name and
+                employee.get("lastName") == expected_last_name and
+                employee.get("email") == expected_email):
+            print(f"Verify failed: Basic employee details mismatch for {expected_email}.")
+            print(f"Expected: {expected_first_name} {expected_last_name}, {expected_email}")
+            print(f"Found: {employee.get('firstName')} {employee.get('lastName')}, {employee.get('email')}")
+            return False
+
+        # Verify details specified in the Portuguese prompt
+        if not (employee.get("nationalIdentityNumber") == expected_national_identity_number and
+                employee.get("dateOfBirth") == expected_date_of_birth and
+                employee.get("occupationCode") == expected_occupation_code and
+                employee.get("employmentPercentage") == expected_employment_percentage and
+                employee.get("startDate") == expected_start_date):
+            print(f"Verify failed: Prompt-specific employee details mismatch for {expected_email}.")
+            print(f"Expected - ID: {expected_national_identity_number}, DOB: {expected_date_of_birth}, OccCode: {expected_occupation_code}, EmpPerc: {expected_employment_percentage}, StartDate: {expected_start_date}")
+            print(f"Found - ID: {employee.get('nationalIdentityNumber')}, DOB: {employee.get('dateOfBirth')}, OccCode: {employee.get('occupationCode')}, EmpPerc: {employee.get('employmentPercentage')}, StartDate: {employee.get('startDate')}")
+            return False
+
+        # Verify salary (assuming monthlySalary in Tripletex API)
+        # Use a small tolerance for float comparison, and handle potential None for monthlySalary
+        if not (abs((employee.get("monthlySalary") or 0.0) - expected_monthly_salary) < 0.01):
+            print(f"Verify failed: Monthly salary mismatch for {expected_email}.")
+            print(f"Expected: {expected_monthly_salary}, Found: {employee.get('monthlySalary')}")
+            return False
+
+        # Verify department
+        department = employee.get("department")
+        if not (department and department.get("name") == expected_department_name):
+            print(f"Verify failed: Department mismatch for {expected_email}.")
+            print(f"Expected: {expected_department_name}, Found: {department.get('name') if department else 'None'}")
+            return False
+
+        return True
+}
     ]
 
 

@@ -2,7 +2,7 @@ import json
 import re
 import sys
 import subprocess
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 
 STATE_FILE = "competition_state.json"
@@ -38,7 +38,7 @@ def load_state():
     }
 
 def save_state(state):
-    state["last_updated"] = datetime.utcnow().isoformat()
+    state["last_updated"] = datetime.now(timezone.UTC).isoformat()
     Path(STATE_FILE).write_text(
         json.dumps(state, indent=2, ensure_ascii=False),
         encoding="utf-8"

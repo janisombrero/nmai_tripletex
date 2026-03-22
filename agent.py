@@ -38,6 +38,7 @@ FEW-SHOT MAPPING EXAMPLES:
      {"reasoning": "Step 1: Create the order.", "task_type": "create_order", "fields": {"customerName": "X"}},
      {"reasoning": "Step 2: Convert the created order into an invoice.", "task_type": "create_invoice", "fields": {"orderId": "{{step_0.id}}", "customerName": "X"}}
    ]
+6. "Sett fastpris 274950 kr på prosjektet Nettbutikk-utvikling for Skogheim AS (org.nr 826912324). Prosjektleiar er Bjørn Kvamme (bjrn.kvamme@example.org). Fakturer kunden for 50% av fastprisen." -> {"reasoning": "User wants to create a project with a fixed price and invoice a percentage.", "task_type": "create_project_invoice", "fields": {"projectName": "Nettbutikk-utvikling", "customerName": "Skogheim AS", "organizationNumber": "826912324", "fixedPrice": 274950.0, "invoicePercent": 50.0, "projectManagerName": "Bjørn Kvamme", "projectManagerEmail": "bjrn.kvamme@example.org"}}
 
 CRITICAL ROUTING RULE: If prompt mentions hours/timer/horas/Stunden/heures AND invoice/faktura/fatura/factura/Rechnung in the SAME prompt — ALWAYS use register_hours_and_invoice, never create_invoice alone.
 

@@ -1,3 +1,4 @@
+import json as _json
 import logging
 import requests
 from requests.auth import HTTPBasicAuth
@@ -37,17 +38,26 @@ class TripletexClient:
         Stripping at the HTTP layer is a backstop that works regardless of which
         handler built the postings.
         """
+        logger.info("STRIP called for %s", endpoint)
         if "/ledger/voucher" in endpoint and isinstance(body, dict) and "postings" in body:
             strip = {"row", "guiRow"}
             for posting in body.get("postings", []):
                 if isinstance(posting, dict):
+                    before = list(posting.keys())
                     for key in strip:
                         posting.pop(key, None)
+                    after = list(posting.keys())
+                    if before != after:
+                        logger.info("STRIP_DEBUG: posting before=%s after=%s", before, after)
         return body
 
     def post(self, endpoint: str, json: dict = None, params: dict = None):
         if json is not None:
             json = self._strip_voucher_postings(endpoint, json)
+        if "/ledger/voucher" in endpoint and not any(
+            x in endpoint for x in ["/:sendToLedger", "/:sendToInbox", "/attachment", "/pdf"]
+        ):
+            logger.info("VOUCHER_DEBUG payload: %s", _json.dumps(json, default=str)[:800])
         url = self._url(endpoint)
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         try:

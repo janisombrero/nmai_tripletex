@@ -439,10 +439,17 @@ class TaskHandler:
         last = fields.get("lastName") or fields.get("last_name", "Employee")
         email = fields.get("email")
 
+        if not email:
+            # Tripletex requires an email for Tripletex-users ("Må angis for Tripletex-brukere").
+            # Generate a deterministic fallback from the employee's name.
+            first_slug = first.lower().replace(" ", ".")
+            last_slug = last.lower().replace(" ", ".")
+            email = f"{first_slug}.{last_slug}@example.com"
+            logger.info("No email provided — using fallback email: %s", email)
+
         payload = {"firstName": first, "lastName": last}
-        if email:
-            payload["email"] = email
-            payload["userType"] = 1
+        payload["email"] = email
+        payload["userType"] = 1
         phone = fields.get("phone") or fields.get("phoneNumber")
         if phone:
             payload["phoneNumberMobile"] = str(phone)

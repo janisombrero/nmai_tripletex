@@ -39,6 +39,8 @@ FEW-SHOT MAPPING EXAMPLES:
      {"reasoning": "Step 2: Convert the created order into an invoice.", "task_type": "create_invoice", "fields": {"orderId": "{{step_0.id}}", "customerName": "X"}}
    ]
 6. "Sett fastpris 274950 kr på prosjektet Nettbutikk-utvikling for Skogheim AS (org.nr 826912324). Prosjektleiar er Bjørn Kvamme (bjrn.kvamme@example.org). Fakturer kunden for 50% av fastprisen." -> {"reasoning": "User wants to create a project with a fixed price and invoice a percentage.", "task_type": "create_project_invoice", "fields": {"projectName": "Nettbutikk-utvikling", "customerName": "Skogheim AS", "organizationNumber": "826912324", "fixedPrice": 274950.0, "invoicePercent": 50.0, "projectManagerName": "Bjørn Kvamme", "projectManagerEmail": "bjrn.kvamme@example.org"}}
+7. "Run payroll for Lucy Walker for this month. Base salary 43050 NOK, one-time bonus 6100 NOK." -> {"reasoning": "User wants to run payroll with a base salary and a one-time bonus.", "task_type": "run_payroll", "fields": {"employeeName": "Lucy Walker", "baseSalary": 43050.0, "bonus": 6100.0}}
+8. "Kjør lønn for Ola Nordmann, fastlønn 38000 kr, bonus 2500 kr." -> {"reasoning": "Norwegian payroll request with base salary and bonus.", "task_type": "run_payroll", "fields": {"employeeName": "Ola Nordmann", "baseSalary": 38000.0, "bonus": 2500.0}}
 
 CRITICAL ROUTING RULE: If prompt mentions hours/timer/horas/Stunden/heures AND invoice/faktura/fatura/factura/Rechnung in the SAME prompt — ALWAYS use register_hours_and_invoice, never create_invoice alone.
 
@@ -84,7 +86,8 @@ Task types and their fields:
 - create_payroll_tax_reconciliation: year (integer), term (1-6)
 - upload_document: customerId/Name, employeeId/Name, projectId, supplierId, or productId
 - register_hours_and_invoice: hours (number), employeeName/Email, employeeEmail (optional), activityName, projectName, customerName, hourlyRate, invoiceRequired (true), date (YYYY-MM-DD)
-- create_project_invoice: projectName, customerName, fixedPrice, invoicePercent (default 100), invoiceAmount, startDate, endDate, invoiceDate, dueDate
+- create_project_invoice: projectName, customerName, organizationNumber (optional), fixedPrice, invoicePercent (default 100), invoiceAmount, startDate, endDate, invoiceDate, dueDate, projectManagerName (optional), projectManagerEmail (optional)
+- run_payroll: employeeName, employeeEmail (optional), baseSalary (number), bonus (optional number, one-time bonus)
 - unknown: (fallback)
 
 For dates, use today's date (2026-03-20) if not specified.

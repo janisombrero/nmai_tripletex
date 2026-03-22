@@ -1725,17 +1725,28 @@ class TaskHandler:
 
     def handle_create_project_invoice(self, fields: dict) -> dict:
         """Create a project with fixed price and immediately invoice a percentage of it."""
-        self._ensure_bank_account()
         if fields.get("hours"):
             logger.info("handle_create_project_invoice: delegating to handle_register_hours_and_invoice (hours present)")
             return self.handle_register_hours_and_invoice(fields)
 
-        customer_id = fields.get("customerId") or self._ensure_customer(fields.get("customerName", ""), org_number=fields.get("orgNumber"))
+        # Accept both field name variants (orgNumber from older code, organizationNumber from SYSTEM_PROMPT)
+        org_number = fields.get("orgNumber") or fields.get("organizationNumber") or fields.get("orgno")
+        customer_id = fields.get("customerId") or self._ensure_customer(
+            fields.get("customerName", ""), org_number=org_number
+        )
         if not customer_id:
             return {"success": False, "message": "Could not find or create customer"}
 
-        manager_id = fields.get("projectManagerId") or self._find_employee_id(fields.get("projectManagerName") or fields.get("managerName") or "")
-        if not manager_id: manager_id = self._find_employee_id_for_project()
+        # Try email first (more reliable), then name, then any available manager
+        manager_id = fields.get("projectManagerId")
+        if not manager_id:
+            email = fields.get("projectManagerEmail") or fields.get("managerEmail")
+            if email:
+                manager_id = self._find_employee_id(email)
+        if not manager_id:
+            manager_id = self._find_employee_id(fields.get("projectManagerName") or fields.get("managerName") or "")
+        if not manager_id:
+            manager_id = self._find_employee_id_for_project()
 
         project_payload = {
             "name": fields.get("projectName") or fields.get("name", "Project"),
@@ -1804,6 +1815,92 @@ class TaskHandler:
             return {"success": False, "message": f"Project id={project_id}, order id={order_id} created but invoice failed: {inv_data}"}
 
         return {"success": True, "message": f"Project created id={project_id} and invoiced", "id": project_id}
+
+    def handle_run_payroll(self, fields: dict) -> dict:
+        """Run payroll for an employee: create a salary transaction + payslip."""
+        import datetime as _dt
+
+        employee_name = fields.get("employeeName") or fields.get("name", "")
+        employee_email = fields.get("employeeEmail") or fields.get("email", "")
+        employee_id = fields.get("employeeId")
+
+        if not employee_id:
+            if employee_email:
+                employee_id = self._find_employee_id(employee_email)
+            if not employee_id and employee_name:
+                employee_id = self._find_employee_id(employee_name)
+        if not employee_id:
+            return {"success": False, "message": f"Employee not found: {employee_name or employee_email}"}
+
+        base_salary = self._to_float(fields.get("baseSalary") or fields.get("salary") or 0)
+        bonus = self._to_float(
+            fields.get("bonus") or fields.get("oneTimeBonus") or fields.get("bonusAmount") or 0
+        )
+
+        # Current-month period
+        today = _dt.date.today()
+        period_from = today.replace(day=1).strftime("%Y-%m-%d")
+        next_month_first = (today.replace(day=1) + _dt.timedelta(days=32)).replace(day=1)
+        period_to = (next_month_first - _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # Create the salary transaction header for this payroll run
+        txn_payload = {
+            "payrollTaxCalcMethod": 0,
+            "voucher": {"date": TODAY},
+            "periodFrom": period_from,
+            "periodTo": period_to,
+        }
+        st, sd = self.client.post("/salary/transaction", json=txn_payload)
+        if st not in (200, 201):
+            return {"success": False, "message": f"Failed to create salary transaction: {sd}", "_needs_fallback": True}
+
+        txn_id = self._to_int(sd.get("value", {}).get("id"))
+
+        # Resolve salary type IDs dynamically so we use the sandbox's actual IDs
+        salary_type_id = None
+        bonus_type_id = None
+        st2, st_data = self.client.get("/salary/payslip/salaryType", params={"count": 100})
+        if st2 == 200:
+            for stype in st_data.get("values", []):
+                desc = str(stype.get("description", "")).lower()
+                sid = self._to_int(stype.get("id"))
+                if salary_type_id is None and any(
+                    kw in desc for kw in ("fast", "grunn", "base", "måneds", "lønn", "lonn", "salary")
+                ):
+                    salary_type_id = sid
+                elif bonus_type_id is None and any(
+                    kw in desc for kw in ("bonus", "engangs", "tillegg", "one-time", "variable")
+                ):
+                    bonus_type_id = sid
+        salary_type_id = salary_type_id or 1
+        bonus_type_id = bonus_type_id or salary_type_id  # fallback: same type
+
+        specifications = []
+        if base_salary:
+            specifications.append({"salaryType": {"id": salary_type_id}, "amount": base_salary})
+        if bonus:
+            specifications.append({"salaryType": {"id": bonus_type_id}, "amount": bonus})
+
+        payslip_payload = {
+            "transaction": {"id": txn_id},
+            "employee": {"id": self._to_int(employee_id)},
+            "specifications": specifications,
+        }
+        ps_st, ps_sd = self.client.post("/salary/payslip", json=payslip_payload)
+        if ps_st not in (200, 201):
+            return {
+                "success": False,
+                "message": f"Salary transaction created (id={txn_id}) but payslip failed: {ps_sd}",
+                "_needs_fallback": True,
+            }
+
+        payslip_id = self._to_int(ps_sd.get("value", {}).get("id"))
+        logger.info("TASK_RESULT: type=run_payroll success=True id=%s", payslip_id)
+        return {
+            "success": True,
+            "message": f"Payroll run for employee id={employee_id}: payslip id={payslip_id}, base={base_salary}, bonus={bonus}",
+            "id": payslip_id,
+        }
 
     def handle_unknown_with_agent(self, prompt: str, fields: dict) -> dict:
         """LLM fallback: ask Gemini to provide exact API steps, then execute them."""
@@ -2091,6 +2188,7 @@ class TaskHandler:
             "initiate_year_end_closing": self.handle_initiate_year_end_closing,
             "create_payroll_tax_reconciliation": self.handle_create_payroll_tax_reconciliation,
             "upload_document": self.handle_upload_document,
+            "run_payroll": self.handle_run_payroll,
         }
         handler = handler_map.get(task_type)
         if not handler:

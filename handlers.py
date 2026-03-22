@@ -1210,7 +1210,7 @@ class TaskHandler:
                     vid = self._to_int(v_data.get("value", {}).get("id"))
                     logger.info("Dimension voucher created id=%s", vid)
                     if vid:
-                        app_st, _ = self.client.put(f"/ledger/voucher/{vid}/:approve")
+                        app_st, _ = self.client.put(f"/ledger/voucher/{vid}/:sendToLedger")
                         if app_st in (200, 201, 204):
                             logger.info("Dimension voucher %s approved", vid)
                 else:
@@ -1650,7 +1650,7 @@ class TaskHandler:
             # Approve the voucher so it moves from DRAFT to APPROVED/POSTED state.
             # This is required to pass the second scoring check on the competition platform.
             if vid:
-                app_st, app_data = self.client.put(f"/ledger/voucher/{vid}/:approve")
+                app_st, app_data = self.client.put(f"/ledger/voucher/{vid}/:sendToLedger")
                 if app_st in (200, 201, 204):
                     logger.info("Voucher %s approved successfully", vid)
                 else:
@@ -2396,50 +2396,11 @@ class TaskHandler:
             logger.warning("Salary transaction failed (status=%s): %s — falling back to manual voucher", st, sd)
             return self._payroll_manual_voucher(fields, base_salary, bonus, period_from)
 
+        # POST /salary/payslip does not exist in the Tripletex API — payslips are read-only
+        # (generated internally). Fall back immediately to the manual voucher approach.
         txn_id = self._to_int(sd.get("value", {}).get("id"))
-
-        # Resolve salary type IDs dynamically so we use the sandbox's actual IDs
-        salary_type_id = None
-        bonus_type_id = None
-        st2, st_data = self.client.get("/salary/payslip/salaryType", params={"count": 100})
-        if st2 == 200:
-            for stype in st_data.get("values", []):
-                desc = str(stype.get("description", "")).lower()
-                sid = self._to_int(stype.get("id"))
-                if salary_type_id is None and any(
-                    kw in desc for kw in ("fast", "grunn", "base", "måneds", "lønn", "lonn", "salary")
-                ):
-                    salary_type_id = sid
-                elif bonus_type_id is None and any(
-                    kw in desc for kw in ("bonus", "engangs", "tillegg", "one-time", "variable")
-                ):
-                    bonus_type_id = sid
-        salary_type_id = salary_type_id or 1
-        bonus_type_id = bonus_type_id or salary_type_id  # fallback: same type
-
-        specifications = []
-        if base_salary:
-            specifications.append({"salaryType": {"id": salary_type_id}, "amount": base_salary})
-        if bonus:
-            specifications.append({"salaryType": {"id": bonus_type_id}, "amount": bonus})
-
-        payslip_payload = {
-            "transaction": {"id": txn_id},
-            "employee": {"id": self._to_int(employee_id)},
-            "specifications": specifications,
-        }
-        ps_st, ps_sd = self.client.post("/salary/payslip", json=payslip_payload)
-        if ps_st not in (200, 201):
-            logger.warning("Payslip failed (status=%s): %s — falling back to manual voucher", ps_st, ps_sd)
-            return self._payroll_manual_voucher(fields, base_salary, bonus, period_from)
-
-        payslip_id = self._to_int(ps_sd.get("value", {}).get("id"))
-        logger.info("TASK_RESULT: type=run_payroll success=True id=%s", payslip_id)
-        return {
-            "success": True,
-            "message": f"Payroll run for employee id={employee_id}: payslip id={payslip_id}, base={base_salary}, bonus={bonus}",
-            "id": payslip_id,
-        }
+        logger.info("Salary transaction created id=%s — no payslip POST available, using manual voucher", txn_id)
+        return self._payroll_manual_voucher(fields, base_salary, bonus, period_from)
 
     def _payroll_manual_voucher(self, fields: dict, base_salary: float, bonus: float, date: str) -> dict:
         """Fallback: record payroll as a manual voucher on salary accounts (5000-series).
@@ -2483,7 +2444,7 @@ class TaskHandler:
 
         vid = self._to_int(v_data.get("value", {}).get("id"))
         if vid:
-            app_st, _ = self.client.put(f"/ledger/voucher/{vid}/:approve")
+            app_st, _ = self.client.put(f"/ledger/voucher/{vid}/:sendToLedger")
             if app_st in (200, 201, 204):
                 logger.info("Payroll voucher %s approved", vid)
             else:

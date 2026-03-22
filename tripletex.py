@@ -28,8 +28,6 @@ class TripletexClient:
             logger.error("GET %s error: %s", endpoint, e)
             return 0, {"error": str(e)}
 
-    _VOUCHER_POSTING_STRIP = {"row", "guiRow", "id", "voucher"}
-
     @staticmethod
     def _strip_voucher_postings(endpoint: str, body: dict) -> dict:
         """Remove system-generated fields from voucher postings before sending to Tripletex.

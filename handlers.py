@@ -1282,7 +1282,6 @@ class TaskHandler:
                 "currency": {"id": p.get("currencyId", 1)},
                 "description": p.get("description", description),
                 "date": normalize_date(p.get("date", date)),
-                "row": len(postings) + 1,
             }
             if acc_id_int == 2400 and supplier_id:
                 posting["supplier"] = {"id": self._to_int(supplier_id)}
@@ -1323,7 +1322,6 @@ class TaskHandler:
                         "currency": {"id": 1},
                         "description": description,
                         "date": normalize_date(date),
-                        "row": len(postings) + 1,
                     })
                     total_debit += vat_amount
                     has_2710 = True
@@ -1338,7 +1336,6 @@ class TaskHandler:
                 "currency": {"id": 1},
                 "description": description,
                 "date": normalize_date(date),
-                "row": len(postings) + 1,
                 "supplier": {"id": self._to_int(supplier_id)},
             })
             logger.info("Auto-generated 2400 AP credit posting: -%.2f", total_debit)
@@ -1937,6 +1934,15 @@ class TaskHandler:
                             posting["account"] = {"id": self._to_int(d["values"][0]["id"])}
                         else:
                             logger.warning("Agent fallback: failed to resolve account number %s", acc_num)
+
+                    # Strip system-generated fields that Tripletex rejects on POST to /ledger/voucher.
+                    # "Posteringene på rad 0 (guiRow 0) er systemgenererte og kan ikke opprettes
+                    #  eller endres på utsiden av Tripletex."
+                    if "/ledger/voucher" in path:
+                        _POSTING_SYSTEM_FIELDS = {"row", "guiRow", "id", "voucher"}
+                        for posting in body.get("postings", []):
+                            for field in _POSTING_SYSTEM_FIELDS:
+                                posting.pop(field, None)
 
                 # Fix for employee Brukertype and Department rules
                 if "/employee" in path and "employment" not in path and "entitlement" not in path:

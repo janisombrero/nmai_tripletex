@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 echo "Pulling latest code..."
-git pull origin master
+git pull origin main
 
 echo "Deploying to Cloud Run..."
 gcloud run deploy nmiai \

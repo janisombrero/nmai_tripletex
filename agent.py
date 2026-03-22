@@ -44,7 +44,10 @@ FEW-SHOT MAPPING EXAMPLES:
 9. "Post month-end accruals: debit 5800 for 12000, credit 2910 for 12000." -> {"reasoning": "Month-end closing journal entry with specific account postings.", "task_type": "month_end_closing", "fields": {"description": "Month-end accrual", "date": "2026-03-31", "postings": [{"accountNumber": 5800, "amount": 12000.0}, {"accountNumber": 2910, "amount": -12000.0}]}}
 10. "Year-end closing 2025: depreciate equipment (account 1200) by 50000, reverse prepaid insurance (1710) 8000, book tax at 22%." -> {"reasoning": "Year-end closing with depreciation, prepaid reversal and tax posting.", "task_type": "year_end_closing", "fields": {"year": 2025, "depreciations": [{"accountNumber": 1200, "amount": 50000.0, "description": "Equipment depreciation"}], "prepaidExpenseAccount": 1710, "prepaidExpenseAmount": 8000.0, "taxRate": 0.22}}
 
+11. "Rapprochez le releve bancaire (CSV ci-joint) avec les factures ouvertes. Associez les paiements entrants aux factures clients et les paiements sortants aux factures fournisseurs. Gerez les paiements partiels." -> {"reasoning": "Bank reconciliation request in French — match CSV payments to open invoices.", "task_type": "bank_reconciliation", "fields": {"csv_text": "{{file_content}}"}}
+
 CRITICAL ROUTING RULE: If prompt mentions hours/timer/horas/Stunden/heures AND invoice/faktura/fatura/factura/Rechnung in the SAME prompt — ALWAYS use register_hours_and_invoice, never create_invoice alone.
+CRITICAL ROUTING RULE: If prompt mentions bank statement/releve bancaire/kontoutskrift/Kontoauszug AND CSV/reconciliation/rapprochement/avsemming — ALWAYS use bank_reconciliation and set csv_text from the attached file.
 
 Task types and their fields:
 - create_employee: firstName, lastName, email, phone (optional), employeeNumber (optional), roles (list, e.g. ["ROLE_ADMINISTRATOR"]), dateOfBirth (optional, YYYY-MM-DD), startDate (optional, YYYY-MM-DD), department (optional, string), occupationCode (optional, string), salary (optional, number), employmentPercentage (optional, number), nationalIdentityNumber (optional, string), pdf_text (optional)
@@ -79,7 +82,7 @@ Task types and their fields:
 - create_credit_note: invoiceId or invoiceNumber
 - update_project: projectName or projectId, and fields to update
 - close_project: projectName or projectId
-- bank_reconciliation: (no extra fields — data from attached CSV)
+- bank_reconciliation: csv_text (the raw CSV content from the attached file — ALWAYS populate this from the file attachment)
 - update_contact_person: contactId or (firstName + lastName + customerName)
 - create_asset: name (required), description (optional), acquisitionCost (numeric), acquisitionDate (YYYY-MM-DD)
 - delete_asset: assetId or name

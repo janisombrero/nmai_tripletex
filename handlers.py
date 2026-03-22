@@ -1498,73 +1498,227 @@ class TaskHandler:
         return {"success": status == 200, "message": f"Project {project_id} closed"}
 
     def handle_bank_reconciliation_csv(self, fields: dict) -> dict:
-        import csv
-        import io as _io
+        """Match bank statement CSV lines against open customer and supplier invoices.
 
-        csv_text = fields.get("csv_text", "")
+        Positive amounts  → incoming payments  → match customer invoices
+                            → register via PUT /invoice/{id}/:payment
+        Negative amounts  → outgoing payments  → match supplier invoices
+                            → register via PUT /invoice/{id}/:payment (AP invoices)
+        Partial payments  → use the CSV line amount, not the full invoice total.
+
+        CSV column detection handles English, Norwegian, French, German, Portuguese.
+        """
+        import csv as _csv
+        import io as _io
+        import re as _re
+
+        csv_text = fields.get("csv_text") or fields.get("csvText") or fields.get("csv") or ""
         if not csv_text:
             return {"success": False, "message": "No CSV data provided for bank reconciliation"}
 
-        # Fetch all invoices once for matching
-        status, inv_data = self.client.get(
-            "/invoice",
-            params={"invoiceDateFrom": "2000-01-01", "invoiceDateTo": "2099-12-31",
-                    "fields": "id,invoiceNumber,amountCurrency", "count": 100},
-        )
-        invoices = inv_data.get("values", []) if status == 200 else []
+        # ------------------------------------------------------------------ #
+        # Resolve payment type once (reused for all lines)                   #
+        # ------------------------------------------------------------------ #
+        payment_type_id = None
+        pt_status, pt_data = self.client.get("/invoice/paymentType")
+        if pt_status == 200:
+            for pt in pt_data.get("values", []):
+                desc = pt.get("description", "").lower()
+                if "bank" in desc or "betaling" in desc:
+                    payment_type_id = self._to_int(pt["id"])
+                    break
+            if not payment_type_id and pt_data.get("values"):
+                payment_type_id = self._to_int(pt_data["values"][0]["id"])
+        payment_type_id = payment_type_id or 1
 
-        results = []
+        # ------------------------------------------------------------------ #
+        # Fetch open customer invoices (positive side)                        #
+        # ------------------------------------------------------------------ #
+        _, inv_data = self.client.get(
+            "/invoice",
+            params={
+                "invoiceDateFrom": "2000-01-01", "invoiceDateTo": "2099-12-31",
+                "fields": "id,invoiceNumber,amountCurrency,amountOutstanding,customer",
+                "count": 200,
+            },
+        )
+        # Keep only invoices with an outstanding balance (not fully paid)
+        open_customer_invoices = [
+            inv for inv in inv_data.get("values", [])
+            if self._to_float(inv.get("amountOutstanding") or inv.get("amountCurrency") or 0) > 0.01
+        ]
+
+        # ------------------------------------------------------------------ #
+        # Fetch open supplier / AP invoices (negative side)                  #
+        # Tripletex may expose these at /supplier/invoice; fall back to      #
+        # /invoice with a vendor flag if not available.                       #
+        # ------------------------------------------------------------------ #
+        open_supplier_invoices = []
+        sup_status, sup_data = self.client.get(
+            "/supplier/invoice",
+            params={"fields": "id,invoiceNumber,amountCurrency,amountOutstanding", "count": 200},
+        )
+        if sup_status == 200:
+            open_supplier_invoices = [
+                inv for inv in sup_data.get("values", [])
+                if self._to_float(inv.get("amountOutstanding") or inv.get("amountCurrency") or 0) > 0.01
+            ]
+        else:
+            logger.info("GET /supplier/invoice returned %s — supplier matching skipped", sup_status)
+
+        # ------------------------------------------------------------------ #
+        # Helper: find best matching invoice from a list                      #
+        # Strategy (in priority order):                                       #
+        #   1. Invoice number appears in description                          #
+        #   2. Amount matches outstanding balance exactly (±1 cent)           #
+        #   3. Amount matches total invoice amount (±1 cent) — partial pay   #
+        # ------------------------------------------------------------------ #
+        def _find_invoice(invoices: list, amount: float, description: str):
+            abs_amount = abs(amount)
+            desc_lower = description.lower()
+
+            # 1. Invoice number in description
+            for inv in invoices:
+                inv_num = str(inv.get("invoiceNumber") or "")
+                if inv_num and inv_num in description:
+                    return inv
+
+            # 2. Exact outstanding match
+            for inv in invoices:
+                outstanding = self._to_float(inv.get("amountOutstanding") or 0)
+                if outstanding and abs(outstanding - abs_amount) < 0.02:
+                    return inv
+
+            # 3. Exact total match (for full payments billed as total)
+            for inv in invoices:
+                total = self._to_float(inv.get("amountCurrency") or 0)
+                if total and abs(total - abs_amount) < 0.02:
+                    return inv
+
+            return None
+
+        # ------------------------------------------------------------------ #
+        # Parse CSV                                                           #
+        # ------------------------------------------------------------------ #
+        # Detect delimiter: prefer semicolon if present, else comma
+        delimiter = ";" if csv_text.count(";") > csv_text.count(",") else ","
         try:
-            reader = csv.DictReader(_io.StringIO(csv_text))
+            reader = _csv.DictReader(_io.StringIO(csv_text), delimiter=delimiter)
+            rows = list(reader)
         except Exception as e:
             return {"success": False, "message": f"Failed to parse CSV: {e}"}
 
-        for row in reader:
+        # ------------------------------------------------------------------ #
+        # Column detection keywords (multi-language)                          #
+        # ------------------------------------------------------------------ #
+        AMOUNT_KEYS  = {"amount", "beløp", "belop", "betrag", "montant", "importe", "valor", "kredit", "debet"}
+        DATE_KEYS    = {"date", "dato", "datum", "fecha", "data"}
+        DESC_KEYS    = {"description", "desc", "text", "tekst", "memo", "libelle", "libellé",
+                        "bezeichnung", "descricao", "descricão", "reference", "ref"}
+
+        results = []
+
+        for row in rows:
             amount = None
             date = None
             description = ""
-            for key in row:
-                kl = key.lower()
-                if "amount" in kl or "beløp" in kl or "betrag" in kl or "belop" in kl:
+
+            for key, val in row.items():
+                kl = key.lower().strip()
+                if any(k in kl for k in AMOUNT_KEYS):
                     try:
-                        amount = self._to_float(str(row[key]).replace(",", ".").replace(" ", "").replace("\xa0", ""))
-                    except ValueError:
+                        cleaned = str(val).replace("\xa0", "").replace(" ", "").replace(",", ".")
+                        amount = float(cleaned)
+                    except (ValueError, TypeError):
                         pass
-                if "date" in kl or "dato" in kl or "datum" in kl:
-                    date = normalize_date(row[key])
-                if "desc" in kl or "text" in kl or "tekst" in kl or "memo" in kl:
-                    description = row[key]
+                if any(k in kl for k in DATE_KEYS):
+                    date = normalize_date(str(val).strip())
+                if any(k in kl for k in DESC_KEYS) and not description:
+                    description = str(val).strip()
 
-            if not amount:
+            if amount is None or amount == 0.0:
                 continue
 
-            invoice_id = None
-            for inv in invoices:
-                try:
-                    if abs(self._to_float(inv.get("amountCurrency") or 0) - abs(amount)) < 0.01:
-                        invoice_id = inv["id"]
-                        break
-                except (TypeError, ValueError):
-                    pass
+            pay_date = date or TODAY
 
-            if not invoice_id:
-                results.append({"description": description, "amount": amount, "status": "no_match"})
-                continue
+            if amount > 0:
+                # Incoming payment → customer invoice
+                inv = _find_invoice(open_customer_invoices, amount, description)
+                if not inv:
+                    results.append({"description": description, "amount": amount,
+                                    "direction": "incoming", "status": "no_match"})
+                    logger.info("Bank recon: no customer invoice match for %.2f (%s)", amount, description)
+                    continue
 
-            payment_result = self.handle_register_payment({
-                "invoiceId": invoice_id,
-                "amount": abs(amount),
-                "paymentDate": date or TODAY,
-            })
-            results.append({
-                "invoice_id": invoice_id, "amount": amount,
-                "status": "matched", "success": payment_result.get("success"),
-            })
+                inv_id = self._to_int(inv["id"])
+                st, _ = self.client.put(
+                    f"/invoice/{inv_id}/:payment",
+                    params={
+                        "paymentDate": pay_date,
+                        "paymentTypeId": payment_type_id,
+                        "paidAmount": amount,        # use CSV amount for partial support
+                    },
+                )
+                success = st in (200, 201)
+                if success:
+                    open_customer_invoices.remove(inv)  # avoid double-matching
+                results.append({
+                    "invoice_id": inv_id, "amount": amount,
+                    "direction": "incoming", "status": "matched", "success": success,
+                })
+                logger.info("Bank recon: customer invoice %s ← %.2f (status=%s)", inv_id, amount, st)
 
-        matched = sum(1 for r in results if r.get("status") == "matched")
+            else:
+                # Outgoing payment → supplier invoice
+                if not open_supplier_invoices:
+                    results.append({"description": description, "amount": amount,
+                                    "direction": "outgoing", "status": "no_supplier_invoices"})
+                    continue
+
+                inv = _find_invoice(open_supplier_invoices, amount, description)
+                if not inv:
+                    results.append({"description": description, "amount": amount,
+                                    "direction": "outgoing", "status": "no_match"})
+                    logger.info("Bank recon: no supplier invoice match for %.2f (%s)", amount, description)
+                    continue
+
+                inv_id = self._to_int(inv["id"])
+                # Supplier invoices may use the same payment endpoint or a dedicated one
+                st, _ = self.client.put(
+                    f"/supplier/invoice/{inv_id}/:payment",
+                    params={
+                        "paymentDate": pay_date,
+                        "paymentTypeId": payment_type_id,
+                        "paidAmount": abs(amount),
+                    },
+                )
+                if st not in (200, 201):
+                    # Fall back to the standard invoice payment endpoint
+                    st, _ = self.client.put(
+                        f"/invoice/{inv_id}/:payment",
+                        params={
+                            "paymentDate": pay_date,
+                            "paymentTypeId": payment_type_id,
+                            "paidAmount": abs(amount),
+                        },
+                    )
+                success = st in (200, 201)
+                if success:
+                    open_supplier_invoices.remove(inv)
+                results.append({
+                    "invoice_id": inv_id, "amount": amount,
+                    "direction": "outgoing", "status": "matched", "success": success,
+                })
+                logger.info("Bank recon: supplier invoice %s ← %.2f (status=%s)", inv_id, abs(amount), st)
+
+        matched = sum(1 for r in results if r.get("status") == "matched" and r.get("success"))
+        attempted = sum(1 for r in results if r.get("status") == "matched")
+        logger.info("TASK_RESULT: type=bank_reconciliation success=%s matched=%d/%d",
+                    matched > 0, matched, len(results))
         return {
-            "success": True,
-            "message": f"Bank reconciliation: {matched}/{len(results)} transactions matched",
+            "success": matched > 0,
+            "message": f"Bank reconciliation: {matched}/{len(results)} lines matched and paid "
+                       f"({attempted - matched} payment errors)",
             "results": results,
         }
 

@@ -806,11 +806,17 @@ class TaskHandler:
                 amount = 0
         
         if not amount:
-            # Fetch invoice to get outstanding amount
-            s, d = self.client.get(f"/invoice/{invoice_id}", params={"fields": "id,amountCurrency"})
+            # Prefer amountOutstanding (remaining balance) over amountCurrency (original total).
+            # Using amountCurrency when the invoice is partially paid causes an over-payment
+            # attempt and the invoice never reaches isCharged=True.
+            s, d = self.client.get(f"/invoice/{invoice_id}", params={"fields": "id,amountCurrency,amountOutstanding"})
             if s == 200:
-                amount = self._to_float(d.get("value", {}).get("amountCurrency") or 0)
-                logger.info("Using amountCurrency=%.2f for invoice %s", amount, invoice_id)
+                inv_val = d.get("value", {})
+                outstanding = self._to_float(inv_val.get("amountOutstanding") or 0)
+                currency = self._to_float(inv_val.get("amountCurrency") or 0)
+                amount = outstanding if outstanding else currency
+                logger.info("Invoice %s: amountOutstanding=%.2f amountCurrency=%.2f → using %.2f",
+                            invoice_id, outstanding, currency, amount)
             else:
                 amount = 0
 
@@ -1249,21 +1255,25 @@ class TaskHandler:
 
         raw_postings = fields.get("postings", [])
         postings = []
-        SYSTEM_ACCOUNTS = {2710, 2600, 2700, 2711, 2740} # removed 2400 and 1500 so they can be posted manually with supplier/customer
+        # 2710 (input VAT) must now appear explicitly as a debit row — do NOT skip it.
+        # Other balance-sheet system accounts that Tripletex manages internally are still skipped.
+        SYSTEM_ACCOUNTS = {2600, 2700, 2711, 2740}
 
-        manual_vat_amount = 0
-        expense_line = None
+        has_2400 = False  # track whether an AP credit is already present
+        has_2710 = False  # track whether a VAT debit is already present
+        total_debit = 0.0  # sum of all debit (positive) postings for auto AP generation
 
         for p in raw_postings:
             acc_id = p.get("accountId") or p.get("account", {}).get("id")
+            try:
+                acc_id_int = int(acc_id)
+            except (TypeError, ValueError):
+                acc_id_int = None
+
+            if acc_id_int in SYSTEM_ACCOUNTS:
+                continue
+
             amount = self._to_float(p.get("amount", 0))
-
-            if acc_id == 2710:
-                manual_vat_amount += amount
-                continue
-
-            if acc_id in SYSTEM_ACCOUNTS:
-                continue
 
             posting = {
                 "account": {"id": self._to_int(acc_id) if acc_id else None},
@@ -1272,21 +1282,66 @@ class TaskHandler:
                 "currency": {"id": p.get("currencyId", 1)},
                 "description": p.get("description", description),
                 "date": normalize_date(p.get("date", date)),
-                "row": len(postings) + 1  # Add explicit row to avoid 422 on AP/AR accounts
+                "row": len(postings) + 1,
             }
-            if acc_id == 2400 and supplier_id:
+            if acc_id_int == 2400 and supplier_id:
                 posting["supplier"] = {"id": self._to_int(supplier_id)}
-            
-            # If this looks like an expense (debit), save it as the potential target for VAT
-            if amount > 0 and not expense_line:
-                expense_line = posting
+
+            if acc_id_int == 2400:
+                has_2400 = True
+            if acc_id_int == 2710:
+                has_2710 = True
+            if amount > 0:
+                total_debit += amount
+
             postings.append(posting)
 
-        # Step 2: Collapse manual VAT into the expense line via vatType
-        if manual_vat_amount != 0 and expense_line:
-            # Assuming standard 25% if we see a 2710 line
-            expense_line["vatType"] = {"id": 1} # Standard 25%
-            expense_line["amount"] += manual_vat_amount
+        # Auto-generate 2710 input-VAT debit when a posting signals VAT but 2710 is absent.
+        # Triggers when any raw posting carries a vatType/mva hint and 2710 isn't explicit.
+        if not has_2710:
+            vat_hint = any(
+                p.get("vatType") or p.get("mva") or p.get("vatPercent") or p.get("vatAmount")
+                for p in raw_postings
+            )
+            # Also trigger when the prompt/description mentions VAT (fields-level hint).
+            if not vat_hint:
+                vat_hint = any(
+                    kw in str(fields.get("description", "")).lower()
+                    for kw in ("mva", "vat", "iva", "moms")
+                )
+            if vat_hint:
+                # Determine VAT amount: explicit vatAmount field → else 25% of ex-VAT debit total.
+                vat_amount = self._to_float(fields.get("vatAmount") or 0)
+                if not vat_amount and total_debit:
+                    vat_percent = self._to_float(fields.get("vatPercent") or 25)
+                    vat_amount = round(total_debit * vat_percent / 100, 2)
+                if vat_amount:
+                    postings.append({
+                        "account": {"id": 2710},
+                        "amount": vat_amount,
+                        "amountCurrency": vat_amount,
+                        "currency": {"id": 1},
+                        "description": description,
+                        "date": normalize_date(date),
+                        "row": len(postings) + 1,
+                    })
+                    total_debit += vat_amount
+                    has_2710 = True
+                    logger.info("Auto-generated 2710 VAT debit posting: %.2f", vat_amount)
+
+        # Auto-generate 2400 AP credit when a supplier is known but no AP posting exists.
+        if supplier_id and not has_2400 and total_debit:
+            postings.append({
+                "account": {"id": 2400},
+                "amount": -total_debit,
+                "amountCurrency": -total_debit,
+                "currency": {"id": 1},
+                "description": description,
+                "date": normalize_date(date),
+                "row": len(postings) + 1,
+                "supplier": {"id": self._to_int(supplier_id)},
+            })
+            logger.info("Auto-generated 2400 AP credit posting: -%.2f", total_debit)
 
         if not postings:
             return {"success": False, "message": "No manual posting rows (only system rows found)", "_needs_fallback": True}

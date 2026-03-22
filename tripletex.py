@@ -38,7 +38,7 @@ class TripletexClient:
         handler built the postings.
         """
         if "/ledger/voucher" in endpoint and isinstance(body, dict) and "postings" in body:
-            strip = {"row", "guiRow", "id", "voucher"}
+            strip = {"row", "guiRow"}
             for posting in body.get("postings", []):
                 if isinstance(posting, dict):
                     for key in strip:

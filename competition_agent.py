@@ -81,28 +81,79 @@ def redeploy_service(repo_path: str) -> bool:
     return success
 
 
+def _extract_log_text(entry: dict) -> str:
+    """Extracts text from a Cloud Run log entry, handling all payload types safely.
+
+    Cloud Run log entries come in three forms:
+      - textPayload  — plain-text logs (e.g. print() output)
+      - jsonPayload  — structured logs (Python logging, uvicorn, FastAPI)
+      - protoPayload — audit / system logs
+
+    Using --format="value(textPayload)" with gcloud (or accessing .text_payload on a
+    ProtobufEntry in the Python client) crashes when the entry is not a text entry.
+    This helper handles all three cases safely.
+    """
+    if entry.get("textPayload"):
+        return entry["textPayload"]
+    json_payload = entry.get("jsonPayload")
+    if json_payload:
+        return (
+            json_payload.get("message")
+            or json_payload.get("msg")
+            or str(json_payload)
+        )
+    proto_payload = entry.get("protoPayload")
+    if proto_payload:
+        return str(proto_payload)
+    return ""
+
+
 def download_and_process_logs(repo_path: str) -> bool:
     """Downloads Cloud Run logs and processes them with competition_state.py."""
     log.info("Downloading Cloud Run logs...")
-    # The gcloud command string itself has f-strings, needs careful escaping
+    raw_json_file = SCORER_LOGS_FILE + ".json"
+
+    # Use --format=json so all payload types (text, JSON, proto) are included.
+    # --format="value(textPayload)" silently drops structured/JSON log entries.
     gcloud_command = (
         f"gcloud logging read "
-        f"\"resource.type=cloud_run_revision AND resource.labels.service_name={SERVICE}\" " 
+        f"\"resource.type=cloud_run_revision AND resource.labels.service_name={SERVICE}\" "
         f"--limit=200 "
         f"--project={PROJECT} "
-        f"--format=\"value(textPayload)\" " 
-        f"--freshness=10m > {SCORER_LOGS_FILE} 2>/dev/null"
+        f"--format=json "
+        f"--freshness=10m > {raw_json_file} 2>/dev/null"
     )
     success, _ = run_shell_command(gcloud_command, cwd=repo_path)
-    
-    if success:
-        log.info(f"Logs downloaded to {SCORER_LOGS_FILE}. Processing with competition_state.py...")
-        process_success, _ = run_shell_command(
-            f"python3 {COMPETITION_STATE_SCRIPT} logs {SCORER_LOGS_FILE}",
-            cwd=repo_path
-        )
-        return process_success
-    return False
+
+    if not success:
+        return False
+
+    # Parse JSON and extract text from whichever payload type each entry uses.
+    log.info("Parsing log entries from JSON output...")
+    try:
+        raw_json_path = os.path.join(repo_path, raw_json_file)
+        with open(raw_json_path, encoding="utf-8") as f:
+            entries = json.load(f)
+        lines = [_extract_log_text(e) for e in entries]
+        lines = [l for l in lines if l.strip()]
+        scorer_logs_path = os.path.join(repo_path, SCORER_LOGS_FILE)
+        with open(scorer_logs_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        log.info(f"Extracted {len(lines)} log lines to {SCORER_LOGS_FILE}.")
+    except (json.JSONDecodeError, ValueError):
+        log.warning("gcloud returned no valid JSON (log stream may be empty).")
+        with open(os.path.join(repo_path, SCORER_LOGS_FILE), "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception as e:
+        log.error(f"Error parsing log JSON: {e}")
+        return False
+
+    log.info(f"Processing logs with competition_state.py...")
+    process_success, _ = run_shell_command(
+        f"python3 {COMPETITION_STATE_SCRIPT} logs {SCORER_LOGS_FILE}",
+        cwd=repo_path
+    )
+    return process_success
 
 
 def main():

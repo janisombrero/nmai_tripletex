@@ -14,7 +14,7 @@ import shutil
 import re
 from pathlib import Path
 
-import google.genai as genai
+from google import genai
 from google.genai import types
 
 from dotenv import load_dotenv
@@ -80,16 +80,16 @@ Your task is to provide a corrected version of the code snippet.
         if not api_key:
             log.error("GOOGLE_API_KEY is not set. Cannot call Gemini.")
             return None
-        
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        generation_config = types.GenerationConfig(
-            temperature=0.2, # Keep temperature low for deterministic code generation
+
+        client = genai.Client(api_key=api_key)
+        generation_config = types.GenerateContentConfig(
+            temperature=0.2,  # Keep temperature low for deterministic code generation
         )
-        
-        response = model.generate_content(
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
             contents=full_context,
-            generation_config=generation_config,
+            config=generation_config,
         )
         raw_fix = response.text.strip()
         
@@ -123,38 +123,35 @@ def _apply_fix_to_file(file_path: str, old_code: str, new_code: str) -> bool:
         log.error(f"Error applying fix to {file_path}: {e}")
         return False
 
-def run_script(script_name: str, args: list = None, cwd: str = None) -> (bool, str):
-    """Executes a script in a subprocess and logs its output, returning success status and output."""
-    script_path = os.path.join(cwd if cwd else os.path.dirname(__file__), script_name)
-    command = ["python3", script_path] + (args if args else [])
-    
-    log.info(f"--- Running script: {' '.join(command)} ---")
+def run_shell_command(command: str, cwd: str = None, check: bool = True) -> (bool, str):
+    """Executes a shell command and returns success status and output."""
+    log.info(f"Running command: {command}")
     try:
         process = subprocess.run(
             command,
-            capture_output=True, text=True, check=True, cwd=cwd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=check,
+            cwd=cwd,
         )
-        log.info(f"""Output from {script_name}:
-{process.stdout}""")
+        if process.stdout:
+            log.info(f"Stdout:\n{process.stdout.strip()}")
         if process.stderr:
-            log.warning(f"""Stderr from {script_name}:
-{process.stderr}""")
-        log.info(f"--- Finished script: {script_name} ---")
-        return True, process.stdout
+            log.warning(f"Stderr:\n{process.stderr.strip()}")
+        return True, process.stdout.strip()
     except subprocess.CalledProcessError as e:
-        log.error(f"!!! Script {script_name} failed with exit code {e.returncode} !!!")
-        log.error(f"Stdout: {e.stdout}")
-        log.error(f"Stderr: {e.stderr}")
-        return False, e.stdout + e.stderr
-    except FileNotFoundError:
-        log.error(f"!!! Script not found: {script_path} !!!")
-        return False, f"Script not found: {script_path}"
+        log.error(f"Command failed with exit code {e.returncode}: {command}")
+        log.error(f"Stdout:\n{e.stdout.strip()}")
+        log.error(f"Stderr:\n{e.stderr.strip()}")
+        return False, e.stdout.strip() + e.stderr.strip()
+
 
 def run_script(script_name: str, args: list = None, cwd: str = None) -> (bool, str):
     """Executes a script in a subprocess and logs its output, returning success status and output."""
     script_path = os.path.join(cwd if cwd else os.path.dirname(__file__), script_name)
     command = ["python3", script_path] + (args if args else [])
-    
+
     log.info(f"--- Running script: {' '.join(command)} ---")
     try:
         process = subprocess.run(

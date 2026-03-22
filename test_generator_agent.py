@@ -146,7 +146,7 @@ Return ONLY the Python dictionary for the test case, including the `before_fn` a
 {raw_test_code[:500]}""")
         
         # Clean up markdown code fences if Gemini adds them
-        raw_test_code = re.sub(r'\^```python\s*', '', raw_test_code, flags=re.MULTILINE)
+        raw_test_code = re.sub(r'^```python\s*', '', raw_test_code, flags=re.MULTILINE)
         raw_test_code = re.sub(r'\s*```$', '', raw_test_code, flags=re.MULTILINE)
         raw_test_code = raw_test_code.strip()
 

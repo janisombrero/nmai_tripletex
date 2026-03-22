@@ -70,10 +70,11 @@ def _load_existing_local_tests() -> list[dict]:
         log.error(f"Error reading or parsing {TEST_LOCAL_FILE}: {e}")
     return tests
 
-def _call_gemini_to_generate_test(failing_prompt: str, task_type: str) -> str | None:
+def _call_gemini_to_generate_test(failing_prompt: str, task_type: str, error_detail: str = "") -> str | None:
     """
     Calls Gemini to generate Python code for a new test case.
     This includes the prompt, name, and a verify_fn.
+    error_detail — the actual API error from Cloud Run logs, if available.
     """
     log.info(f"Calling Gemini to generate test for prompt: {failing_prompt[:80]}...")
 
@@ -90,7 +91,14 @@ def _call_gemini_to_generate_test(failing_prompt: str, task_type: str) -> str | 
     except FileNotFoundError:
         log.warning("README.md not found for Gemini context. Proceeding without.")
 
-    # Using single quotes for the f-string to allow easier triple-quote escaping inside
+    error_detail_section = (
+        f"\nThe competition platform recorded this specific API error when the agent attempted "
+        f"this task:\n```\n{error_detail}\n```\n"
+        f"Make sure the `verify_fn` checks the condition that this error suggests was failing, "
+        f"and add a comment in the test dict explaining the known failure mode.\n"
+        if error_detail else ""
+    )
+
     full_context = f'''
 You are an expert Python developer and a test engineer for a Tripletex accounting agent.
 Your task is to generate a new test case to be added to the `test_local.py` file.
@@ -98,7 +106,7 @@ The agent recently failed on the following prompt, which was classified as `{tas
 ```
 {failing_prompt}
 ```
-
+{error_detail_section}
 Here is a partial Tripletex API reference for context:
 ```
 {readme_content}
@@ -108,6 +116,7 @@ Generate a new Python dictionary for a test case. The dictionary will be added t
 The dictionary MUST have the following keys: `number`, `name`, `prompt`.
 It should also include a `verify_fn` which is a Python function definition. This function will use `sandbox_get` and `sandbox_post` helpers (provided by `test_local.py`) to verify that the task was successfully completed in the Tripletex sandbox. The `verify_fn` should return `True` for success, `False` for failure.
 If setup is needed, include a `before_fn` which is also a Python function definition.
+If an error_detail was provided above, include a `# known_error: <error>` comment inside the dict so master_agent has full context.
 
 Example `verify_fn` for `create_employee`:
 ```python
@@ -223,9 +232,12 @@ def main():
             for failing_prompt_record in new_failing_prompts:
                 failing_prompt = failing_prompt_record["prompt"]
                 task_type = failing_prompt_record["task_type"]
-                
+                error_detail = failing_prompt_record.get("error_detail", "")
+
                 log.info(f"Attempting to generate test for: {failing_prompt[:80]}...")
-                generated_test_code = _call_gemini_to_generate_test(failing_prompt, task_type)
+                if error_detail:
+                    log.info(f"Including error_detail in Gemini prompt: {error_detail[:120]}")
+                generated_test_code = _call_gemini_to_generate_test(failing_prompt, task_type, error_detail)
                 
                 if generated_test_code:
                     if _append_test_to_file(generated_test_code):

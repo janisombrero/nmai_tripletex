@@ -89,6 +89,38 @@ Total unique tasks seen: {len(state.get("prompts_seen", []))}
     Path(MEMORY_FILE).write_text(content, encoding="utf-8")
     print(f"✅ MEMORY.md updated")
 
+def _parse_error_detail(block: str) -> str:
+    """Extract the most specific error detail from a single task's log block.
+
+    Tries (in order of specificity):
+      1. validationMessages from a 422 response
+      2. HTTP status + path from client call lines
+      3. First substantive ERROR-level log line
+    Returns at most 400 chars.
+    """
+    parts = []
+
+    # 1. Validation messages are the most actionable
+    for m in re.findall(r"validationMessages['\"]?\s*[:=]\s*(.+)", block):
+        parts.append(m.strip()[:300])
+
+    # 2. HTTP error lines emitted by the Tripletex client
+    if not parts:
+        for m in re.findall(
+            r"(?:status|HTTP)[^\n]*?(\d{3})[^\n]*?(?:Not Found|Bad Request|Unprocessable|Forbidden|Error)[^\n]*",
+            block, re.IGNORECASE
+        ):
+            parts.append(m.strip()[:200])
+
+    # 3. Generic ERROR log lines (skip very short / noisy ones)
+    if not parts:
+        for m in re.findall(r"ERROR[^\n]{20,}", block):
+            parts.append(m.strip()[:200])
+            break
+
+    return " | ".join(parts[:2])[:400] if parts else ""
+
+
 def update_from_logs(log_file):
     state = load_state()
 
@@ -98,27 +130,41 @@ def update_from_logs(log_file):
         print(f"Could not read {log_file}")
         return
 
-    # Extract task data from logs
-    task_pattern = re.findall(
-        r'Incoming prompt: (.+?)\n.*?Task parsed: type=(\w+).*?\n.*?Handler result: (.+)',
-        logs, re.DOTALL
-    )
-
-    # Simpler extraction
-    prompts = re.findall(r'Incoming prompt: (.+)', logs)
-    task_types = re.findall(r'Parsed task_type=(\w+)', logs)
-    results = re.findall(r"Final solver result: (\{.+\})", logs)
-    errors = re.findall(r"ERROR.*?validationMessages: (.+)", logs)
+    # Split into per-task blocks: each block starts at "Incoming prompt:"
+    # This ensures errors are correlated to the task that produced them.
+    raw_blocks = re.split(r'(?=Incoming prompt:)', logs)
 
     new_tasks = 0
-    for i, task_type in enumerate(task_types):
+    tasks_processed = 0
+
+    for block in raw_blocks:
+        prompt_match = re.search(r'Incoming prompt: (.+)', block)
+        if not prompt_match:
+            continue
+        prompt = prompt_match.group(1).strip()
+
+        task_type_match = re.search(r'Parsed task_type=(\w+)', block)
+        if not task_type_match:
+            continue
+        task_type = task_type_match.group(1)
+
         if task_type == "unknown":
             continue
 
-        result_str = results[i] if i < len(results) else ""
-        success = "'success': True" in result_str
+        tasks_processed += 1
 
-        # Initialize task if new
+        # Determine success from TASK_RESULT line; fall back to Final solver result
+        task_result_match = re.search(r'TASK_RESULT:.*?success=(True|False)', block)
+        if task_result_match:
+            success = task_result_match.group(1) == "True"
+        else:
+            result_str = (re.search(r"Final solver result: (\{.+\})", block) or re.search("", "")).group(0)
+            success = "'success': True" in result_str
+
+        # Extract error detail only for failures
+        error_detail = "" if success else _parse_error_detail(block)
+
+        # Update aggregate task score
         if task_type not in state["task_scores"]:
             state["task_scores"][task_type] = {
                 "tier": TIER_MAP.get(task_type, 2),
@@ -131,34 +177,39 @@ def update_from_logs(log_file):
         state["task_scores"][task_type]["attempts"] += 1
 
         if success:
-            # We don't know exact score without sandbox verification
-            # Mark as at least partial
             if state["task_scores"][task_type]["best_score"] == 0:
                 state["task_scores"][task_type]["best_score"] = 0.5
             state["task_scores"][task_type]["status"] = "partial"
         else:
             state["task_scores"][task_type]["status"] = "failing"
-            # Extract error
-            if errors:
-                state["task_scores"][task_type]["last_error"] = errors[0][:200]
+            if error_detail:
+                state["task_scores"][task_type]["last_error"] = error_detail[:200]
 
-        # Record prompt
-        prompt = prompts[i] if i < len(prompts) else ""
-        if prompt:
-            existing = [p.get("prompt", "")[:60] for p in state["prompts_seen"]]
-            if prompt[:60] not in existing:
-                state["prompts_seen"].append({
-                    "task_type": task_type,
-                    "prompt": prompt,
-                    "language": detect_language(prompt),
-                    "result": "success" if success else "failed",
-                    "timestamp": datetime.utcnow().isoformat()
-                })
-                new_tasks += 1
+        # Record prompt (skip near-duplicates by first 60 chars)
+        existing_prefixes = [p.get("prompt", "")[:60] for p in state["prompts_seen"]]
+        if prompt[:60] not in existing_prefixes:
+            record = {
+                "task_type": task_type,
+                "prompt": prompt,
+                "language": detect_language(prompt),
+                "result": "success" if success else "failed",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            if not success and error_detail:
+                record["error_detail"] = error_detail
+            state["prompts_seen"].append(record)
+            new_tasks += 1
+        else:
+            # Update error_detail on existing record if we now have one
+            if not success and error_detail:
+                for rec in state["prompts_seen"]:
+                    if rec.get("prompt", "")[:60] == prompt[:60]:
+                        rec["error_detail"] = error_detail
+                        break
 
     save_state(state)
     update_memory_file(state)
-    print(f"State updated — {len(task_types)} tasks processed, {new_tasks} new prompts recorded")
+    print(f"State updated — {tasks_processed} tasks processed, {new_tasks} new prompts recorded")
 
 def detect_language(prompt):
     if any(w in prompt.lower() for w in ["registre", "gere", "fatura", "horas"]):

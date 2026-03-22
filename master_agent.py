@@ -38,6 +38,24 @@ log = logging.getLogger(__name__)
 # --- Helper Functions ---
 from logging import StreamHandler # ADDED
 
+def _load_competition_error(task_type: str) -> str:
+    """Return the most recent error_detail for task_type from competition_state.json, or ''."""
+    state_path = os.path.join(os.path.dirname(__file__), "competition_state.json")
+    try:
+        state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+    # Prefer the most recent failed prompt record that has an error_detail
+    for record in reversed(state.get("prompts_seen", [])):
+        if record.get("task_type") == task_type and record.get("error_detail"):
+            return record["error_detail"]
+
+    # Fall back to task_scores last_error
+    score = state.get("task_scores", {}).get(task_type, {})
+    return score.get("last_error") or ""
+
+
 def _call_gemini_for_fix(
     failing_prompt: str,
     error_message: str,
@@ -48,7 +66,13 @@ def _call_gemini_for_fix(
     """Calls Gemini to generate a code fix for a failing test."""
     log.info("Calling Gemini to generate code fix...")
 
-    # Using single quotes for the f-string to allow easier triple-quote escaping inside
+    competition_error_section = (
+        f"\nAdditionally, the live competition Cloud Run logs recorded this specific API error "
+        f"for the same task type:\n```\n{error_message}\n```\n"
+        if error_message and error_message != "Test failed in local runner."
+        else ""
+    )
+
     full_context = f'''
 You are an expert Python developer whose task is to fix bugs in an accounting agent.
 The accounting agent uses the Tripletex API.
@@ -58,11 +82,11 @@ A test case is failing. Here is the test prompt:
 {failing_prompt}
 ```
 
-The error message from the test run is:
+The error observed during the test run is:
 ```
 {error_message}
 ```
-
+{competition_error_section}
 The relevant code that is causing the failure is from the file `{code_source_file}`, specifically the function/prompt named `{code_target_name}`. Here is the current code:
 ```python
 {relevant_code}
@@ -328,10 +352,16 @@ def main():
                     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
                         log.info(f"Self-healing attempt {attempt}/{MAX_FIX_ATTEMPTS}...")
                         
+                        # Look up real API error detail from competition_state.json
+                        competition_error = _load_competition_error(inferred_target)
+                        error_msg = competition_error or "Test failed in local runner."
+                        if competition_error:
+                            log.info(f"Using competition error detail for Gemini: {competition_error[:120]}")
+
                         # Call Gemini to get a proposed fix
                         gemini_fix = _call_gemini_for_fix(
                             failing_prompt=test_details['prompt'],
-                            error_message="Test failed in local runner.", # Generic error for now
+                            error_message=error_msg,
                             relevant_code=relevant_code,
                             code_source_file=code_source_file,
                             code_target_name=code_target_name

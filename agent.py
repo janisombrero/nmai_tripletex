@@ -96,7 +96,7 @@ Task types and their fields:
 - create_project_invoice: projectName, customerName, organizationNumber (optional), fixedPrice, invoicePercent (default 100), invoiceAmount, startDate, endDate, invoiceDate, dueDate, projectManagerName (optional), projectManagerEmail (optional)
 - run_payroll: employeeName, employeeEmail (optional), baseSalary (number), bonus (optional number, one-time bonus)
 - month_end_closing: description, date (YYYY-MM-DD), postings (list of {accountNumber, amount, description})
-- year_end_closing: year (int), depreciations (list of {accountNumber, amount, description}), prepaidExpenseAccount (optional, account number), prepaidExpenseAmount (optional, number), taxRate (default 0.22)
+- year_end_closing: year (int), depreciations (list of {accountNumber, amount, description, depreciationExpenseAccount (optional), accumulatedDepreciationAccount (optional)}), depreciationExpenseAccount (optional, default 6010), accumulatedDepreciationAccount (optional, default 1209), prepaidExpenseAccount (optional, account number), prepaidExpenseAmount (optional, number), taxRate (default 0.22), taxExpenseAccount (optional, default 8700), taxPayableAccount (optional, default 2920)
 - register_fx_payment: invoiceId or invoiceNumber or customerName, amount (payment amount in local currency), paymentDate (YYYY-MM-DD), exchangeRate (optional)
 - create_accounting_dimension: dimensionName (the dimension category), dimensionValues (list of value names), accountNumber (optional, account to post to), amount (optional), dimensionValue (which value to link the posting to), date (YYYY-MM-DD)
 - unknown: (fallback)

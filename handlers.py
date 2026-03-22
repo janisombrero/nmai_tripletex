@@ -1547,6 +1547,12 @@ class TaskHandler:
                         resolved = self._find_account_id(maybe_num)
                         if resolved is not None:
                             acc_id = resolved
+                        else:
+                            logger.warning(
+                                "Skipping posting: account id %s looks like a chart number but not found in ledger",
+                                maybe_num,
+                            )
+                            continue
                 except (TypeError, ValueError):
                     pass
 
@@ -2291,22 +2297,41 @@ class TaskHandler:
         results = []
         total_expense = 0.0
 
+        # Resolve shared depreciation accounts once (prompt may override via fields)
+        global_dep_exp_acc = self._find_account_id(
+            fields.get("depreciationExpenseAccount") or 6010
+        )
+        global_acc_dep_acc = self._find_account_id(
+            fields.get("accumulatedDepreciationAccount") or 1209
+        )
+
         # 1. Depreciation vouchers
         for dep in fields.get("depreciations", []):
             acc_num = dep.get("accountNumber") or dep.get("account")
             amount = self._to_float(dep.get("amount") or 0)
             if not acc_num or not amount:
                 continue
-            acc_id = self._find_account_id(acc_num)
-            if acc_id is None:
-                logger.warning("year_end_closing: cannot resolve depreciation account %s — skipping", acc_num)
+
+            # Resolve per-entry override accounts, fall back to global, then to asset account
+            dep_exp_id = self._find_account_id(dep.get("depreciationExpenseAccount") or 0) \
+                         or global_dep_exp_acc
+            acc_dep_id = self._find_account_id(dep.get("accumulatedDepreciationAccount") or 0) \
+                         or global_acc_dep_acc
+
+            # Asset cost account (the one being depreciated)
+            asset_id = self._find_account_id(acc_num)
+            if asset_id is None:
+                logger.warning("year_end_closing: cannot resolve asset account %s — skipping", acc_num)
                 continue
-            acc_dep_id = self._find_account_id(6010)  # 6010 = depreciation expense (standard)
+
+            # Debit depreciation expense, credit accumulated depreciation (or asset if unavailable)
+            debit_id = dep_exp_id or asset_id
+            credit_id = acc_dep_id or asset_id
             dep_desc = dep.get("description") or f"Depreciation {year}"
             postings = [
-                {"accountId": acc_dep_id or acc_id, "amount": amount,
+                {"accountId": debit_id, "amount": amount,
                  "description": dep_desc, "date": closing_date},
-                {"accountId": acc_id, "amount": -amount,
+                {"accountId": credit_id, "amount": -amount,
                  "description": dep_desc, "date": closing_date},
             ]
             res = self.handle_create_voucher({
@@ -2339,11 +2364,13 @@ class TaskHandler:
                 if res.get("success"):
                     total_expense += prepaid_amt
 
-        # 3. Tax provision voucher (debit 8300 tax expense, credit 2500 tax payable)
+        # 3. Tax provision voucher — use prompt-specified accounts, fall back to 8700/2920
         if total_expense and tax_rate:
             tax_amount = round(total_expense * tax_rate, 2)
-            tax_exp_id = self._find_account_id(8300)
-            tax_pay_id = self._find_account_id(2500)
+            tax_exp_num = fields.get("taxExpenseAccount") or fields.get("taxAccount") or 8700
+            tax_pay_num = fields.get("taxPayableAccount") or fields.get("taxLiabilityAccount") or 2920
+            tax_exp_id = self._find_account_id(tax_exp_num) or self._find_account_id(8300)
+            tax_pay_id = self._find_account_id(tax_pay_num) or self._find_account_id(2500)
             if tax_exp_id and tax_pay_id:
                 res = self.handle_create_voucher({
                     "date": closing_date,

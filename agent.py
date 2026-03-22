@@ -45,9 +45,11 @@ FEW-SHOT MAPPING EXAMPLES:
 10. "Year-end closing 2025: depreciate equipment (account 1200) by 50000, reverse prepaid insurance (1710) 8000, book tax at 22%." -> {"reasoning": "Year-end closing with depreciation, prepaid reversal and tax posting.", "task_type": "year_end_closing", "fields": {"year": 2025, "depreciations": [{"accountNumber": 1200, "amount": 50000.0, "description": "Equipment depreciation"}], "prepaidExpenseAccount": 1710, "prepaidExpenseAmount": 8000.0, "taxRate": 0.22}}
 
 11. "Rapprochez le releve bancaire (CSV ci-joint) avec les factures ouvertes. Associez les paiements entrants aux factures clients et les paiements sortants aux factures fournisseurs. Gerez les paiements partiels." -> {"reasoning": "Bank reconciliation request in French — match CSV payments to open invoices.", "task_type": "bank_reconciliation", "fields": {"csv_text": "{{file_content}}"}}
+12. "Crie uma dimensão contabilística personalizada 'Marked' com os valores 'Bedrift' e 'Privat'. Em seguida, lance um documento na conta 6590 por 16750 NOK, vinculado ao valor de dimensão 'Bedrift'." -> {"reasoning": "Portuguese prompt: create custom accounting dimension with values, then post voucher linked to a dimension value.", "task_type": "create_accounting_dimension", "fields": {"dimensionName": "Marked", "dimensionValues": ["Bedrift", "Privat"], "accountNumber": 6590, "amount": 16750.0, "dimensionValue": "Bedrift"}}
 
 CRITICAL ROUTING RULE: If prompt mentions hours/timer/horas/Stunden/heures AND invoice/faktura/fatura/factura/Rechnung in the SAME prompt — ALWAYS use register_hours_and_invoice, never create_invoice alone.
 CRITICAL ROUTING RULE: If prompt mentions bank statement/releve bancaire/kontoutskrift/Kontoauszug AND CSV/reconciliation/rapprochement/avsemming — ALWAYS use bank_reconciliation and set csv_text from the attached file.
+CRITICAL ROUTING RULE: If prompt mentions dimensão/dimension/dimensjon/Dimension AND values/valores/verdier — ALWAYS use create_accounting_dimension, never create_department alone.
 
 Task types and their fields:
 - create_employee: firstName, lastName, email, phone (optional), employeeNumber (optional), roles (list, e.g. ["ROLE_ADMINISTRATOR"]), dateOfBirth (optional, YYYY-MM-DD), startDate (optional, YYYY-MM-DD), department (optional, string), occupationCode (optional, string), salary (optional, number), employmentPercentage (optional, number), nationalIdentityNumber (optional, string), pdf_text (optional)
@@ -96,6 +98,7 @@ Task types and their fields:
 - month_end_closing: description, date (YYYY-MM-DD), postings (list of {accountNumber, amount, description})
 - year_end_closing: year (int), depreciations (list of {accountNumber, amount, description}), prepaidExpenseAccount (optional, account number), prepaidExpenseAmount (optional, number), taxRate (default 0.22)
 - register_fx_payment: invoiceId or invoiceNumber or customerName, amount (payment amount in local currency), paymentDate (YYYY-MM-DD), exchangeRate (optional)
+- create_accounting_dimension: dimensionName (the dimension category), dimensionValues (list of value names), accountNumber (optional, account to post to), amount (optional), dimensionValue (which value to link the posting to), date (YYYY-MM-DD)
 - unknown: (fallback)
 
 For dates, use today's date (2026-03-20) if not specified.

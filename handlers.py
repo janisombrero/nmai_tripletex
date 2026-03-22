@@ -2393,7 +2393,8 @@ class TaskHandler:
         }
         st, sd = self.client.post("/salary/transaction", json=txn_payload)
         if st not in (200, 201):
-            return {"success": False, "message": f"Failed to create salary transaction: {sd}", "_needs_fallback": True}
+            logger.warning("Salary transaction failed (status=%s): %s — falling back to manual voucher", st, sd)
+            return self._payroll_manual_voucher(fields, base_salary, bonus, period_from)
 
         txn_id = self._to_int(sd.get("value", {}).get("id"))
 
@@ -2429,11 +2430,8 @@ class TaskHandler:
         }
         ps_st, ps_sd = self.client.post("/salary/payslip", json=payslip_payload)
         if ps_st not in (200, 201):
-            return {
-                "success": False,
-                "message": f"Salary transaction created (id={txn_id}) but payslip failed: {ps_sd}",
-                "_needs_fallback": True,
-            }
+            logger.warning("Payslip failed (status=%s): %s — falling back to manual voucher", ps_st, ps_sd)
+            return self._payroll_manual_voucher(fields, base_salary, bonus, period_from)
 
         payslip_id = self._to_int(ps_sd.get("value", {}).get("id"))
         logger.info("TASK_RESULT: type=run_payroll success=True id=%s", payslip_id)
@@ -2441,6 +2439,61 @@ class TaskHandler:
             "success": True,
             "message": f"Payroll run for employee id={employee_id}: payslip id={payslip_id}, base={base_salary}, bonus={bonus}",
             "id": payslip_id,
+        }
+
+    def _payroll_manual_voucher(self, fields: dict, base_salary: float, bonus: float, date: str) -> dict:
+        """Fallback: record payroll as a manual voucher on salary accounts (5000-series).
+
+        Debit  5000 (salary expense)   for total gross pay
+        Credit 2900 (accrued salaries) for the same amount
+        """
+        total = round(base_salary + bonus, 2)
+        if not total:
+            return {"success": False, "message": "Payroll fallback: no salary amount to post"}
+
+        salary_acc_id = self._find_account_id(5000)
+        accrued_acc_id = self._find_account_id(2900)
+
+        if not salary_acc_id:
+            logger.warning("Account 5000 not found — trying 5010")
+            salary_acc_id = self._find_account_id(5010)
+        if not accrued_acc_id:
+            logger.warning("Account 2900 not found — trying 2920")
+            accrued_acc_id = self._find_account_id(2920)
+
+        if not salary_acc_id or not accrued_acc_id:
+            return {"success": False, "message": f"Payroll fallback: could not resolve accounts (5000={salary_acc_id}, 2900={accrued_acc_id})", "_needs_fallback": True}
+
+        employee_name = fields.get("employeeName") or fields.get("name", "Employee")
+        description = f"Lønn {employee_name} — basis {base_salary}" + (f", bonus {bonus}" if bonus else "")
+
+        postings = [
+            {"account": {"id": salary_acc_id}, "amount": total, "amountCurrency": total, "currency": {"id": 1}, "description": description, "date": date},
+            {"account": {"id": accrued_acc_id}, "amount": -total, "amountCurrency": -total, "currency": {"id": 1}, "description": description, "date": date},
+        ]
+        payload = {
+            "date": date,
+            "description": description,
+            "voucherType": {"id": 1},
+            "postings": postings,
+        }
+        v_st, v_data = self.client.post("/ledger/voucher", json=payload)
+        if v_st not in (200, 201):
+            return {"success": False, "message": f"Payroll manual voucher failed: {v_data}", "_needs_fallback": True}
+
+        vid = self._to_int(v_data.get("value", {}).get("id"))
+        if vid:
+            app_st, _ = self.client.put(f"/ledger/voucher/{vid}/:approve")
+            if app_st in (200, 201, 204):
+                logger.info("Payroll voucher %s approved", vid)
+            else:
+                logger.warning("Payroll voucher approve returned %s", app_st)
+
+        logger.info("TASK_RESULT: type=run_payroll success=True id=%s (manual voucher)", vid)
+        return {
+            "success": True,
+            "message": f"Payroll posted as manual voucher id={vid}: {description}",
+            "id": vid,
         }
 
     def handle_unknown_with_agent(self, prompt: str, fields: dict) -> dict:

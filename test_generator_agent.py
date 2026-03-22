@@ -171,7 +171,14 @@ def _append_test_to_file(test_code: str):
         current_list_str = match.group(2).strip()
         if not current_list_str.endswith(','):
             current_list_str += ','
-        
+
+        # Strip any markdown fence lines Gemini may have left in the generated code
+        clean_lines = [
+            line for line in test_code.splitlines()
+            if line.strip() not in ('```python', '```')
+        ]
+        test_code = '\n'.join(clean_lines)
+
         # The new test_code needs to be indented correctly
         new_list_content = f"{current_list_str}\n        {test_code}"
         

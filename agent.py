@@ -95,6 +95,7 @@ Task types and their fields:
 - run_payroll: employeeName, employeeEmail (optional), baseSalary (number), bonus (optional number, one-time bonus)
 - month_end_closing: description, date (YYYY-MM-DD), postings (list of {accountNumber, amount, description})
 - year_end_closing: year (int), depreciations (list of {accountNumber, amount, description}), prepaidExpenseAccount (optional, account number), prepaidExpenseAmount (optional, number), taxRate (default 0.22)
+- register_fx_payment: invoiceId or invoiceNumber or customerName, amount (payment amount in local currency), paymentDate (YYYY-MM-DD), exchangeRate (optional)
 - unknown: (fallback)
 
 For dates, use today's date (2026-03-20) if not specified.

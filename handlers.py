@@ -670,10 +670,10 @@ class TaskHandler:
                     logger.info("Attempt %d: Retrying product create with new random number: %s", attempt+1, payload["number"])
                     continue
 
-                # Case 2: vatType conflict
+                # Case 2: vatType conflict — strip vatType entirely
                 if "vattype" in hints or "mva" in hints or "vat" in hints:
-                    payload["vatType"] = {"id": 0}
-                    logger.info("Attempt %d: Retrying product create with vatType 0", attempt+1)
+                    payload.pop("vatType", None)
+                    logger.info("Attempt %d: Retrying product create with vatType stripped", attempt+1)
                     continue
 
             # If not 422 or if it's a different 422 that we don't handle, break and return
@@ -724,8 +724,8 @@ class TaskHandler:
                 logger.warning("Order create 422: %s", hints)
                 if "vattype" in hints.lower() or "mva" in hints.lower() or "vat" in hints.lower():
                     for line in order_payload["orderLines"]:
-                        line["vatType"] = {"id": 0}
-                    logger.info("Retrying order create with vatType 0 in lines")
+                        line.pop("vatType", None)
+                    logger.info("Retrying order create with vatType stripped from lines")
                     status, order_data = self.client.post("/order", json=order_payload)
 
             if status not in (200, 201):
@@ -954,6 +954,91 @@ class TaskHandler:
 
         logger.warning("Invoice search for '%s' failed (status=%s)", s_num, status)
         return None
+
+    def handle_register_fx_payment(self, fields: dict) -> dict:
+        """Register payment at a new exchange rate and create an FX difference voucher."""
+        invoice_id = self._find_invoice_id_by_number(
+            invoice_number=fields.get("invoiceNumber"),
+            invoice_id=fields.get("invoiceId"),
+        )
+        if not invoice_id:
+            customer_name = fields.get("customerName")
+            if customer_name:
+                s, d = self.client.get("/invoice", params={
+                    "count": 50, "fields": "id,invoiceNumber,amountCurrency,amountOutstanding,customer",
+                    "invoiceDateFrom": "2000-01-01", "invoiceDateTo": "2099-12-31"
+                })
+                if s == 200:
+                    cn_lower = customer_name.lower()
+                    for inv in d.get("values", []):
+                        cust = inv.get("customer") or {}
+                        if cn_lower in str(cust.get("name", "")).lower():
+                            invoice_id = self._to_int(inv["id"])
+                            break
+        if not invoice_id:
+            return {"success": False, "message": "register_fx_payment: could not find invoice"}
+
+        # Fetch invoice details to get original amount and outstanding
+        s, inv_data = self.client.get(f"/invoice/{invoice_id}", params={
+            "fields": "id,invoiceNumber,amountCurrency,amountOutstanding,currency"
+        })
+        if s != 200:
+            return {"success": False, "message": f"register_fx_payment: invoice fetch failed: {inv_data}"}
+
+        inv = inv_data.get("value", {})
+        original_amount = self._to_float(inv.get("amountCurrency") or inv.get("amount") or 0)
+        outstanding = self._to_float(inv.get("amountOutstanding") or original_amount)
+        payment_amount = self._to_float(fields.get("amount") or outstanding)
+        payment_date = normalize_date(fields.get("paymentDate") or fields.get("date", TODAY)) or TODAY
+
+        # Register the payment
+        pay_status, pay_data = self.client.post(
+            f"/invoice/{invoice_id}/:payment",
+            json={"paymentDate": payment_date, "paymentTypeId": 1, "paidAmount": payment_amount},
+        )
+        if pay_status not in (200, 201):
+            return {"success": False, "message": f"register_fx_payment: payment failed: {pay_data}"}
+
+        # Calculate FX difference
+        fx_diff = round(payment_amount - outstanding, 2)
+        if abs(fx_diff) < 0.01:
+            logger.info("register_fx_payment: no FX difference (diff=%.2f), done", fx_diff)
+            return {"success": True, "message": f"FX payment registered, no difference", "id": invoice_id}
+
+        # Create FX difference voucher
+        # Gain: debit 1500 (AR), credit 8060 (FX gain)
+        # Loss: debit 8160 (FX loss), credit 1500 (AR)
+        ar_id = self._find_account_id(1500)
+        if fx_diff > 0:
+            gain_id = self._find_account_id(8060)
+            postings = [
+                {"account": {"id": ar_id}, "amount": fx_diff, "description": "FX gain AR"},
+                {"account": {"id": gain_id}, "amount": -fx_diff, "description": "FX gain income"},
+            ] if ar_id and gain_id else []
+        else:
+            loss_id = self._find_account_id(8160)
+            postings = [
+                {"account": {"id": loss_id}, "amount": abs(fx_diff), "description": "FX loss"},
+                {"account": {"id": ar_id}, "amount": -abs(fx_diff), "description": "FX loss AR"},
+            ] if ar_id and loss_id else []
+
+        if postings:
+            voucher_fields = {
+                "date": payment_date,
+                "description": f"FX difference on invoice {invoice_id}",
+                "postings": postings,
+            }
+            v_result = self.handle_create_voucher(voucher_fields)
+            if not v_result.get("success"):
+                logger.warning("register_fx_payment: FX voucher failed: %s", v_result)
+
+        logger.info("TASK_RESULT: type=register_fx_payment success=True id=%s", invoice_id)
+        return {
+            "success": True,
+            "message": f"FX payment {payment_amount} registered, FX diff={fx_diff}",
+            "id": invoice_id,
+        }
+
     def handle_create_credit_note(self, fields: dict) -> dict:
         invoice_id = self._find_invoice_id_by_number(
             invoice_number=fields.get("invoiceNumber"),
@@ -1110,8 +1195,8 @@ class TaskHandler:
             logger.warning("Order create 422: %s", hints)
             if "vattype" in hints.lower() or "mva" in hints.lower() or "vat" in hints.lower():
                 for line in payload["orderLines"]:
-                    line["vatType"] = {"id": 0}
-                logger.info("Retrying order create with vatType 0 in lines")
+                    line.pop("vatType", None)
+                logger.info("Retrying order create with vatType stripped from lines")
                 status, data = self.client.post("/order", json=payload)
 
         if status not in (200, 201):
@@ -2352,13 +2437,20 @@ class TaskHandler:
                     if "amount" in posting and isinstance(posting["amount"], dict):
                         posting["amount"] = self._to_float(posting["amount"].get("value", 0))
                     
-                    if "account" in posting and "number" in posting["account"] and "id" not in posting["account"]:
-                        acc_num = posting["account"]["number"]
-                        resolved = self._find_account_id(acc_num)
-                        if resolved is not None:
-                            posting["account"] = {"id": resolved}
-                        else:
-                            logger.warning("Agent fallback: failed to resolve account number %s", acc_num)
+                    if "account" in posting:
+                        acc = posting["account"]
+                        acc_num = None
+                        if "number" in acc and "id" not in acc:
+                            acc_num = acc["number"]
+                        elif "id" in acc and isinstance(acc["id"], (int, float)) and int(acc["id"]) <= 9999:
+                            # Small id → chart-of-accounts number, not internal Tripletex ID
+                            acc_num = int(acc["id"])
+                        if acc_num is not None:
+                            resolved = self._find_account_id(acc_num)
+                            if resolved is not None:
+                                posting["account"] = {"id": resolved}
+                            else:
+                                logger.warning("Agent fallback: failed to resolve account number %s", acc_num)
 
                     # Strip system-generated posting fields and illegal voucher-root fields.
                     if "/ledger/voucher" in path:
@@ -2516,6 +2608,7 @@ class TaskHandler:
             "run_payroll": self.handle_run_payroll,
             "month_end_closing": self.handle_create_voucher,
             "year_end_closing": self.handle_year_end_closing,
+            "register_fx_payment": self.handle_register_fx_payment,
         }
         handler = handler_map.get(task_type)
         if not handler:

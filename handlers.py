@@ -301,7 +301,7 @@ class TaskHandler:
         _FALLBACKS = {
             "1209": ["1210", "1200"],  # accumulated depreciation → asset cost account
             "8700": ["8300"],           # tax expense → betalbar skatt
-            "1990": ["1500"],           # clearing/suspense → receivables
+            "1990": ["2990", "1590"],    # clearing/suspense → other short-term liabilities
             "2900": ["2960", "2940"],   # accrued salaries → other accrued costs
         }
         for fallback in _FALLBACKS.get(key, []):
@@ -1018,15 +1018,23 @@ class TaskHandler:
         if not invoice_id:
             customer_name = fields.get("customerName")
             if customer_name:
+                # Resolve customer name → ID first (invoice list doesn't include customer name)
+                cust_id = self._find_customer_id(customer_name)
                 s, d = self.client.get("/invoice", params={
-                    "count": 50, "fields": "id,invoiceNumber,amountCurrency,amountOutstanding,customer",
-                    "invoiceDateFrom": "2000-01-01", "invoiceDateTo": "2099-12-31"
+                    "count": 100, "sorting": "-id",
+                    "invoiceDateFrom": "2000-01-01", "invoiceDateTo": "2099-12-31",
                 })
                 if s == 200:
                     cn_lower = customer_name.lower()
                     for inv in d.get("values", []):
                         cust = inv.get("customer") or {}
-                        if cn_lower in str(cust.get("name", "")).lower():
+                        cust_inv_id = self._to_int(cust.get("id") or 0)
+                        cust_inv_name = str(cust.get("name") or "").lower()
+                        out = self._to_float(inv.get("amountOutstanding") or 0)
+                        if out > 0 and (
+                            (cust_id and cust_inv_id == self._to_int(cust_id))
+                            or cn_lower in cust_inv_name
+                        ):
                             invoice_id = self._to_int(inv["id"])
                             break
         if not invoice_id:
@@ -1045,10 +1053,22 @@ class TaskHandler:
         payment_amount = self._to_float(fields.get("amount") or outstanding)
         payment_date = normalize_date(fields.get("paymentDate") or fields.get("date", TODAY)) or TODAY
 
-        # Register the payment
-        pay_status, pay_data = self.client.post(
+        # Resolve payment type ID dynamically (hardcoded 1 may not exist in sandbox)
+        payment_type_id = 1
+        pt_st, pt_data = self.client.get("/invoice/paymentType")
+        if pt_st == 200 and pt_data.get("values"):
+            for pt in pt_data["values"]:
+                desc = pt.get("description", "").lower()
+                if "bank" in desc or "betaling" in desc:
+                    payment_type_id = self._to_int(pt["id"])
+                    break
+            else:
+                payment_type_id = self._to_int(pt_data["values"][0]["id"])
+
+        # Register the payment (Tripletex uses PUT with query params, not POST)
+        pay_status, pay_data = self.client.put(
             f"/invoice/{invoice_id}/:payment",
-            json={"paymentDate": payment_date, "paymentTypeId": 1, "paidAmount": payment_amount},
+            params={"paymentDate": payment_date, "paymentTypeId": payment_type_id, "paidAmount": payment_amount},
         )
         if pay_status not in (200, 201):
             return {"success": False, "message": f"register_fx_payment: payment failed: {pay_data}"}
@@ -1791,7 +1811,7 @@ class TaskHandler:
             "/invoice",
             params={
                 "invoiceDateFrom": "2000-01-01", "invoiceDateTo": "2099-12-31",
-                "fields": "id,invoiceNumber,amountCurrency,amountOutstanding,customer",
+                "sorting": "-id",
                 "count": 200,
             },
         )
@@ -2514,6 +2534,97 @@ class TaskHandler:
             "id": vid,
         }
 
+    def handle_cost_analysis_projects(self, fields: dict) -> dict:
+        """Identify top-N expense accounts by Jan→Feb increase, create projects + activities."""
+        import collections
+
+        from_month = fields.get("fromMonth", "2026-01")
+        to_month = fields.get("toMonth", "2026-02")
+        project_count = int(fields.get("projectCount") or 3)
+
+        # Parse month strings
+        try:
+            fy, fm = from_month.split("-")
+            ty, tm = to_month.split("-")
+            import calendar
+            last_day_from = calendar.monthrange(int(fy), int(fm))[1]
+            last_day_to = calendar.monthrange(int(ty), int(tm))[1]
+            date_from_start = f"{fy}-{fm}-01"
+            date_from_end = f"{fy}-{fm}-{last_day_from:02d}"
+            date_to_start = f"{ty}-{tm}-01"
+            date_to_end = f"{ty}-{tm}-{last_day_to:02d}"
+        except Exception:
+            date_from_start, date_from_end = "2026-01-01", "2026-01-31"
+            date_to_start, date_to_end = "2026-02-01", "2026-02-28"
+
+        def _get_postings(date_start, date_end):
+            totals = collections.defaultdict(float)
+            names = {}
+            _, d = self.client.get("/ledger/posting", params={
+                "dateFrom": date_start, "dateTo": date_end, "count": 500,
+            })
+            for p in d.get("values", []):
+                acc = p.get("account") or {}
+                num = acc.get("number")
+                if num and 5000 <= int(num) <= 8999:
+                    totals[num] += float(p.get("amount") or 0)
+                    names[num] = acc.get("name") or f"Konto {num}"
+            return totals, names
+
+        jan_totals, acc_names = _get_postings(date_from_start, date_from_end)
+        feb_totals, feb_names = _get_postings(date_to_start, date_to_end)
+        acc_names.update(feb_names)
+
+        # Compute increases (absolute amounts)
+        all_accs = set(list(jan_totals.keys()) + list(feb_totals.keys()))
+        increases = {}
+        for acc in all_accs:
+            inc = feb_totals.get(acc, 0) - jan_totals.get(acc, 0)
+            if inc > 0:
+                increases[acc] = inc
+
+        top_accs = sorted(increases.items(), key=lambda x: x[1], reverse=True)[:project_count]
+
+        # Fallback: if no posting data, use first N expense accounts from chart
+        if not top_accs:
+            logger.info("cost_analysis: no posting data found, falling back to ledger account list")
+            _, a_data = self.client.get("/ledger/account", params={"count": 500})
+            expense_accs = [
+                a for a in a_data.get("values", [])
+                if a.get("number") and 5000 <= int(a["number"]) <= 8999
+            ]
+            top_accs = [(str(a["number"]), 0) for a in expense_accs[:project_count]]
+            for num, _ in top_accs:
+                for a in expense_accs:
+                    if str(a["number"]) == num:
+                        acc_names[num] = a.get("name") or f"Konto {num}"
+
+        created = []
+        for acc_num, _ in top_accs:
+            name = (acc_names.get(acc_num) or f"Konto {acc_num}")[:50]
+            proj_res = self.handle_create_project({"name": name})
+            if not proj_res.get("success"):
+                proj_res = self.handle_create_project({"name": f"Konto {acc_num}"})
+            if proj_res.get("success"):
+                proj_id = proj_res["id"]
+                act_st, act_data = self.client.post("/activity", json={
+                    "name": (f"Analyse {name}")[:50],
+                    "isProjectActivity": True,
+                    "isGeneral": True,
+                    "activityType": "PROJECT_GENERAL_ACTIVITY",
+                })
+                act_id = self._to_int(act_data.get("value", {}).get("id")) if act_st in (200, 201) else None
+                created.append({"projectId": proj_id, "activityId": act_id, "account": acc_num, "name": name})
+                logger.info("cost_analysis: created project %s '%s' + activity %s", proj_id, name, act_id)
+
+        success = len(created) >= project_count
+        logger.info("TASK_RESULT: type=cost_analysis_projects success=%s projects=%d", success, len(created))
+        return {
+            "success": success,
+            "message": f"Cost analysis: {len(created)} projects with activities created",
+            "projects": created,
+        }
+
     def handle_unknown_with_agent(self, prompt: str, fields: dict) -> dict:
         """LLM fallback: ask Gemini to provide exact API steps, then execute them."""
         from agent import _GOOGLE_API_KEY as api_key
@@ -2808,6 +2919,7 @@ class TaskHandler:
             "year_end_closing": self.handle_year_end_closing,
             "register_fx_payment": self.handle_register_fx_payment,
             "create_accounting_dimension": self.handle_create_accounting_dimension,
+            "cost_analysis_projects": self.handle_cost_analysis_projects,
         }
         handler = handler_map.get(task_type)
         if not handler:

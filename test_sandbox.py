@@ -236,6 +236,52 @@ BANK_RECON_CSV = """date,description,amount
 2026-01-25,Customer payment partial,-5000"""
 
 
+def _ensure_customer(client, name, org_number=None):
+    """Return existing customer id or create a new one."""
+    params = {"count": 5}
+    if org_number:
+        params["organizationNumber"] = org_number
+    st, d = client.get("/customer", params=params)
+    for c in d.get("values", []):
+        if name.lower() in c.get("name", "").lower() or (org_number and c.get("organizationNumber") == org_number):
+            return c["id"]
+    payload = {"name": name, "isCustomer": True}
+    if org_number:
+        payload["organizationNumber"] = org_number
+    st2, d2 = client.post("/customer", json=payload)
+    if st2 in (200, 201):
+        return d2.get("value", {}).get("id")
+    return None
+
+
+def _ensure_open_invoice(client, customer_id, amount_nok, description="Test invoice"):
+    """Return existing open invoice id for customer, or create one via order→invoice."""
+    st, d = client.get("/invoice", params={
+        "invoiceDateFrom": "2000-01-01", "invoiceDateTo": "2099-12-31", "count": 50,
+    })
+    for inv in d.get("values", []):
+        c = inv.get("customer") or {}
+        if c.get("id") == customer_id:
+            outstanding = float(inv.get("amountOutstanding") or 0)
+            if abs(outstanding - amount_nok) < 1.0:
+                return inv["id"]
+
+    # Create order then invoice
+    st2, d2 = client.post("/order", json={
+        "customer": {"id": customer_id},
+        "orderDate": "2026-01-10",
+        "deliveryDate": "2026-01-31",
+        "orderLines": [{"description": description, "count": 1, "unitPriceExcludingVatCurrency": amount_nok}],
+    })
+    if st2 not in (200, 201):
+        return None
+    order_id = d2.get("value", {}).get("id")
+    st3, d3 = client.put(f"/order/{order_id}/:invoice", params={"invoiceDate": "2026-01-10"})
+    if st3 in (200, 201):
+        return d3.get("value", {}).get("id")
+    return None
+
+
 def setup_sandbox_data():
     """Create test employees needed by T4/T6 if they don't already exist."""
     client = make_client()
@@ -262,6 +308,25 @@ def setup_sandbox_data():
                 print(f"  Setup: employee create FAILED {r_st}: {r_d.get('validationMessages', r_d)}")
         else:
             print(f"  Setup: employee {emp['email']} already exists")
+
+    # T8: ensure an open customer invoice for 25000 NOK exists (bank reconciliation CSV line 1)
+    cust_id_recon = _ensure_customer(client, "Acme AS")
+    if cust_id_recon:
+        inv_id = _ensure_open_invoice(client, cust_id_recon, 25000.0, "INV-001 Services")
+        if inv_id:
+            print(f"  Setup: T8 invoice 25000 NOK for Acme AS id={inv_id}")
+        else:
+            print("  Setup: T8 invoice create FAILED")
+
+    # T9: ensure Tindra AS customer + open invoice for FX payment test
+    tindra_id = _ensure_customer(client, "Tindra AS", org_number="862097653")
+    if tindra_id:
+        # Invoice amount ~= 11497 EUR * 10.84 NOK/EUR (payment rate) so payment goes through
+        inv_id9 = _ensure_open_invoice(client, tindra_id, 124618.0, "EUR invoice Tindra AS")
+        if inv_id9:
+            print(f"  Setup: T9 invoice 124618 NOK for Tindra AS id={inv_id9}")
+        else:
+            print("  Setup: T9 invoice create FAILED")
 
 
 def main():

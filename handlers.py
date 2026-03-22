@@ -803,6 +803,12 @@ class TaskHandler:
         invoice_number = str(fields.get("invoiceNumber", ""))
         
         # Resolve invoice ID if only number is provided
+        # Detect template placeholder invoice numbers that the agent failed to resolve
+        _PLACEHOLDER_KEYWORDS = {"original", "overdue", "specify", "placeholder", "invoice number", "number here"}
+        if invoice_number and any(kw in invoice_number.lower() for kw in _PLACEHOLDER_KEYWORDS):
+            logger.info("Invoice number %r looks like a template placeholder — treating as absent", invoice_number)
+            invoice_number = ""
+
         if not invoice_id and not invoice_number:
             customer_id = fields.get("customerId") or self._find_customer_id(fields.get("customerName", ""))
             if customer_id:
@@ -1007,6 +1013,19 @@ class TaskHandler:
                     return self._to_int(inv["id"])
 
         logger.warning("Invoice search for '%s' failed (status=%s)", s_num, status)
+        return None
+
+    def find_overdue_invoice(self) -> dict | None:
+        """Return the open customer invoice with the oldest due date, or None."""
+        today = TODAY
+        s, d = self.client.get("/invoice", params={
+            "invoiceDateTo": today, "count": 100, "sorting": "invoiceDueDate",
+        })
+        if s != 200:
+            return None
+        for inv in d.get("values", []):
+            if self._to_float(inv.get("amountOutstanding") or 0) > 0:
+                return inv
         return None
 
     def handle_register_fx_payment(self, fields: dict) -> dict:
@@ -1544,6 +1563,13 @@ class TaskHandler:
                 s_res = self.handle_create_supplier({"name": supplier_name})
                 supplier_id = s_res.get("id") if s_res.get("success") else None
 
+        # Resolve customer for AR postings (account 1500 requires a customer reference)
+        voucher_customer_id = fields.get("customerId")
+        if not voucher_customer_id and fields.get("customerName"):
+            voucher_customer_id = self._find_customer_id(fields["customerName"])
+        if voucher_customer_id:
+            voucher_customer_id = self._to_int(voucher_customer_id)
+
         raw_postings = fields.get("postings", [])
         postings = []
         # 2710 (input VAT) must now appear explicitly as a debit row — do NOT skip it.
@@ -1631,6 +1657,8 @@ class TaskHandler:
             # Use original chart number (not resolved internal ID) for semantic checks
             if original_chart_num == 2400 and supplier_id:
                 posting["supplier"] = {"id": self._to_int(supplier_id)}
+            if original_chart_num == 1500 and voucher_customer_id:
+                posting["customer"] = {"id": voucher_customer_id}
 
             if original_chart_num == 2400:
                 has_2400 = True
@@ -2199,11 +2227,19 @@ class TaskHandler:
         }
         ord_status, ord_data = self.client.post("/order", json=order_payload)
 
+        # 422 self-healing: strip vatType from ALL order lines on mva/vatType error
         if ord_status == 422:
-            patched = self.handle_422_retry("/order", order_payload,
-                                            ord_data.get("validationMessages", []))
-            if patched:
-                ord_status, ord_data = self.client.post("/order", json=patched)
+            hints = self._validation_hints(ord_data)
+            if "vattype" in hints.lower() or "mva" in hints.lower() or "vat" in hints.lower():
+                for line in order_payload["orderLines"]:
+                    line.pop("vatType", None)
+                logger.info("Retrying hours-and-invoice order with vatType stripped")
+                ord_status, ord_data = self.client.post("/order", json=order_payload)
+            else:
+                patched = self.handle_422_retry("/order", order_payload,
+                                                ord_data.get("validationMessages", []))
+                if patched:
+                    ord_status, ord_data = self.client.post("/order", json=patched)
 
         if ord_status not in (200, 201):
             logger.info("TASK_RESULT: type=register_hours_and_invoice success=False id=%s", ts_id)
@@ -2309,12 +2345,19 @@ class TaskHandler:
             }],
         }
         ord_status, ord_data = self.client.post("/order", json=order_payload)
-        
-        # 422 self-healing for order
+
+        # 422 self-healing: strip vatType from ALL order lines on mva/vatType error
         if ord_status == 422:
-            patched = self.handle_422_retry("/order", order_payload, ord_data.get("validationMessages", []))
-            if patched:
-                ord_status, ord_data = self.client.post("/order", json=patched)
+            hints = self._validation_hints(ord_data)
+            if "vattype" in hints.lower() or "mva" in hints.lower() or "vat" in hints.lower():
+                for line in order_payload["orderLines"]:
+                    line.pop("vatType", None)
+                logger.info("Retrying project invoice order with vatType stripped")
+                ord_status, ord_data = self.client.post("/order", json=order_payload)
+            else:
+                patched = self.handle_422_retry("/order", order_payload, ord_data.get("validationMessages", []))
+                if patched:
+                    ord_status, ord_data = self.client.post("/order", json=patched)
 
         if ord_status not in (200, 201):
             return {"success": False, "message": f"Project id={project_id} created but order failed: {ord_data}"}

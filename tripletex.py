@@ -28,7 +28,28 @@ class TripletexClient:
             logger.error("GET %s error: %s", endpoint, e)
             return 0, {"error": str(e)}
 
+    _VOUCHER_POSTING_STRIP = {"row", "guiRow", "id", "voucher"}
+
+    @staticmethod
+    def _strip_voucher_postings(endpoint: str, body: dict) -> dict:
+        """Remove system-generated fields from voucher postings before sending to Tripletex.
+
+        Tripletex rejects POST/PUT /ledger/voucher with 422 if postings contain
+        fields like 'row' or 'guiRow' (system-generated values it manages internally).
+        Stripping at the HTTP layer is a backstop that works regardless of which
+        handler built the postings.
+        """
+        if "/ledger/voucher" in endpoint and isinstance(body, dict) and "postings" in body:
+            strip = {"row", "guiRow", "id", "voucher"}
+            for posting in body.get("postings", []):
+                if isinstance(posting, dict):
+                    for key in strip:
+                        posting.pop(key, None)
+        return body
+
     def post(self, endpoint: str, json: dict = None, params: dict = None):
+        if json is not None:
+            json = self._strip_voucher_postings(endpoint, json)
         url = self._url(endpoint)
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         try:
@@ -43,6 +64,8 @@ class TripletexClient:
             return 0, {"error": str(e)}
 
     def put(self, endpoint: str, json: dict = None, params: dict = None):
+        if json is not None:
+            json = self._strip_voucher_postings(endpoint, json)
         url = self._url(endpoint)
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         try:

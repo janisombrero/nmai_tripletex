@@ -15,11 +15,17 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+_bank_account_initialized = False
+
 def ensure_sandbox_bank_account(client):
+    global _bank_account_initialized
+    if _bank_account_initialized:
+        return
     status, data = client.get("/ledger/account", params={"isBankAccount": "true", "count": 10})
     if status == 200 and data.get("values"):
         for acc in data["values"]:
             if acc.get("bankAccountNumber"):
+                _bank_account_initialized = True
                 return
         first_acc = data["values"][0]
         first_acc["bankAccountNumber"] = "12345678903"
@@ -34,7 +40,8 @@ def ensure_sandbox_bank_account(client):
                     acc["bankAccountNumber"] = "12345678903"
                     client.put(f"/ledger/account/{acc['id']}", json=acc)
                     logger.info("Auto-registered bank account number %s for newly configured bank account %s", "12345678903", acc['id'])
-                    return
+                    break
+    _bank_account_initialized = True
 
 import os
 from datetime import datetime

@@ -67,6 +67,7 @@ class TaskHandler:
         self.client = client
         self._vat_cache: list | None = None
         self._account_id_cache: dict = {}
+        self._activity_id_cache: dict = {}
         self.files = files or []  # raw file dicts from the request body
 
     def resolve_templates(self, obj, context):
@@ -1657,7 +1658,7 @@ class TaskHandler:
             # Use original chart number (not resolved internal ID) for semantic checks
             if original_chart_num == 2400 and supplier_id:
                 posting["supplier"] = {"id": self._to_int(supplier_id)}
-            if original_chart_num == 1500 and voucher_customer_id:
+            if original_chart_num is not None and 1500 <= original_chart_num <= 1599 and voucher_customer_id:
                 posting["customer"] = {"id": voucher_customer_id}
 
             if original_chart_num == 2400:
@@ -2058,7 +2059,6 @@ class TaskHandler:
 
     def handle_register_hours_and_invoice(self, fields: dict) -> dict:
         """Log hours for an employee on a project activity, then optionally invoice."""
-        self._ensure_bank_account()
         hours = fields.get("hours")
         try:
             hours = self._to_float(str(hours).replace(",", ".")) if hours is not None else None
@@ -2089,9 +2089,13 @@ class TaskHandler:
         elif not fields.get("customerId") and customer_name:
             lookups["customer_name"] = ("/customer", {"name": customer_name,
                                                         "count": 5, "fields": "id,name"})
-        if not fields.get("employeeId") and employee_email:
-            lookups["employee_email"] = ("/employee", {"email": employee_email,
-                                                         "count": 1, "fields": "id,firstName,lastName"})
+        if not fields.get("employeeId"):
+            if employee_email:
+                lookups["employee_email"] = ("/employee", {"email": employee_email,
+                                                             "count": 1, "fields": "id,firstName,lastName"})
+            if employee_name:
+                lookups["employee_name"] = ("/employee", {"name": employee_name,
+                                                            "count": 1, "fields": "id,firstName,lastName"})
 
         parallel_results = self._parallel_lookup(lookups) if lookups else {}
 
@@ -2110,13 +2114,17 @@ class TaskHandler:
 
         # --- Step 2: resolve employee ---
         employee_id = fields.get("employeeId")
-        if not employee_id and "employee_email" in parallel_results:
-            p_st, p_d = parallel_results["employee_email"]
-            if p_st == 200 and p_d.get("values"):
-                employee_id = p_d["values"][0]["id"]
-                logger.info("Employee resolved from parallel lookup: id=%s", employee_id)
         if not employee_id:
-            employee_id = self._ensure_employee(employee_name or employee_email or "Unknown", email=employee_email)
+            for key in ("employee_email", "employee_name"):
+                if key in parallel_results:
+                    p_st, p_d = parallel_results[key]
+                    if p_st == 200 and p_d.get("values"):
+                        employee_id = p_d["values"][0]["id"]
+                        logger.info("Employee resolved from parallel lookup (%s): id=%s", key, employee_id)
+                        break
+        if not employee_id:
+            # Use find (not ensure/create) to avoid extra POST calls that burn API quota
+            employee_id = self._find_employee_id(employee_email or employee_name or "")
         if not employee_id:
             logger.info("TASK_RESULT: type=register_hours_and_invoice success=False id=None")
             return {"success": False, "message": "Could not find or create employee"}
@@ -3113,7 +3121,15 @@ class TaskHandler:
 
     def _resolve_activity_id(self, name: str = None, project_id: int = None) -> int:
         """Find activity by name; try project-specific first, then general, then id=1."""
+        cache_key = f"{name}:{project_id}"
+        if cache_key in self._activity_id_cache:
+            return self._activity_id_cache[cache_key]
+
         name_lower = name.lower() if name else ""
+
+        def _cache_return(val: int) -> int:
+            self._activity_id_cache[cache_key] = val
+            return val
 
         # Step 1: project-specific activity list (optimistic — 404 handled gracefully)
         if project_id and name:
@@ -3123,7 +3139,7 @@ class TaskHandler:
                 for a in d.get("values", []):
                     if name_lower in (a.get("name") or "").lower():
                         logger.info("Project-specific activity '%s' -> id=%s (project %s)", name, a["id"], project_id)
-                        return self._to_int(a["id"])
+                        return _cache_return(self._to_int(a["id"]))
 
         # Step 2: general activity search by name
         if name:
@@ -3133,18 +3149,18 @@ class TaskHandler:
                 for a in d.get("values", []):
                     if name_lower in (a.get("name") or "").lower():
                         logger.info("Activity '%s' -> id=%s", name, a["id"])
-                        return self._to_int(a["id"])
+                        return _cache_return(self._to_int(a["id"]))
             # Also try GET /activity/>forTimeSheet which lists timesheet-eligible activities
             st, d = self.client.get("/activity/>forTimeSheet", params={"count": 50, "fields": "id,name"})
             if st == 200:
                 for a in d.get("values", []):
                     if name_lower in (a.get("name") or "").lower():
                         logger.info("Activity '%s' found via forTimeSheet -> id=%s", name, a["id"])
-                        return self._to_int(a["id"])
+                        return _cache_return(self._to_int(a["id"]))
 
         # Fallback to standard activity ID
         st, d = self.client.get("/activity", params={"count": 5, "isProjectActivity": True, "fields": "id"})
         if st == 200 and d.get("values"):
-            return self._to_int(d["values"][0]["id"])
-        
-        return 5614480 # Hardcoded from sandbox check just in case
+            return _cache_return(self._to_int(d["values"][0]["id"]))
+
+        return _cache_return(5614480)  # Hardcoded from sandbox check just in case

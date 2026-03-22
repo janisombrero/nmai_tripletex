@@ -244,6 +244,22 @@ class TaskHandler:
             return self._to_int(data["values"][0]["id"])
         return None
 
+    def _clean_postings(self, postings: list) -> list:
+        """Strip system-generated fields from every posting dict before sending to
+        POST /ledger/voucher.  Tripletex rejects postings that contain these fields
+        with the error:
+          "Posteringene på rad 0 (guiRow 0) er systemgenererte og kan ikke opprettes
+           eller endres på utsiden av Tripletex."
+        Fields stripped at posting level: row, guiRow, id, voucher.
+        The 'id' key on the nested 'account' sub-object is intentionally preserved.
+        """
+        _STRIP = {"row", "guiRow", "id", "voucher"}
+        for p in postings:
+            if isinstance(p, dict):
+                for field in _STRIP:
+                    p.pop(field, None)
+        return postings
+
     def _find_account_id(self, number) -> int | None:
         """Resolve a ledger account number (e.g. 7100) to the internal Tripletex integer ID.
 
@@ -1416,11 +1432,13 @@ class TaskHandler:
             "date": normalize_date(date) or TODAY,
             "description": description,
             "voucherType": {"id": self._to_int(fields.get("voucherTypeId", 1))},
-            "postings": postings,
+            "postings": self._clean_postings(postings),
         }
         if invoice_number:
             payload["vendorInvoiceNumber"] = str(invoice_number)
-            
+        # Tripletex /ledger/voucher does NOT accept a top-level department field.
+        payload.pop("department", None)
+
         status, data = self.client.post("/ledger/voucher", json=payload)
         if status in (200, 201):
             vid = self._to_int(data.get("value", {}).get("id"))
@@ -2188,14 +2206,11 @@ class TaskHandler:
                         else:
                             logger.warning("Agent fallback: failed to resolve account number %s", acc_num)
 
-                    # Strip system-generated fields that Tripletex rejects on POST to /ledger/voucher.
-                    # "Posteringene på rad 0 (guiRow 0) er systemgenererte og kan ikke opprettes
-                    #  eller endres på utsiden av Tripletex."
+                    # Strip system-generated posting fields and illegal voucher-root fields.
                     if "/ledger/voucher" in path:
-                        _POSTING_SYSTEM_FIELDS = {"row", "guiRow", "id", "voucher"}
-                        for posting in body.get("postings", []):
-                            for field in _POSTING_SYSTEM_FIELDS:
-                                posting.pop(field, None)
+                        self._clean_postings(body.get("postings", []))
+                        # Tripletex does not accept department on the voucher root.
+                        body.pop("department", None)
 
                 # Fix for employee Brukertype and Department rules
                 if "/employee" in path and "employment" not in path and "entitlement" not in path:

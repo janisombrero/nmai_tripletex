@@ -41,6 +41,8 @@ FEW-SHOT MAPPING EXAMPLES:
 6. "Sett fastpris 274950 kr på prosjektet Nettbutikk-utvikling for Skogheim AS (org.nr 826912324). Prosjektleiar er Bjørn Kvamme (bjrn.kvamme@example.org). Fakturer kunden for 50% av fastprisen." -> {"reasoning": "User wants to create a project with a fixed price and invoice a percentage.", "task_type": "create_project_invoice", "fields": {"projectName": "Nettbutikk-utvikling", "customerName": "Skogheim AS", "organizationNumber": "826912324", "fixedPrice": 274950.0, "invoicePercent": 50.0, "projectManagerName": "Bjørn Kvamme", "projectManagerEmail": "bjrn.kvamme@example.org"}}
 7. "Run payroll for Lucy Walker for this month. Base salary 43050 NOK, one-time bonus 6100 NOK." -> {"reasoning": "User wants to run payroll with a base salary and a one-time bonus.", "task_type": "run_payroll", "fields": {"employeeName": "Lucy Walker", "baseSalary": 43050.0, "bonus": 6100.0}}
 8. "Kjør lønn for Ola Nordmann, fastlønn 38000 kr, bonus 2500 kr." -> {"reasoning": "Norwegian payroll request with base salary and bonus.", "task_type": "run_payroll", "fields": {"employeeName": "Ola Nordmann", "baseSalary": 38000.0, "bonus": 2500.0}}
+9. "Post month-end accruals: debit 5800 for 12000, credit 2910 for 12000." -> {"reasoning": "Month-end closing journal entry with specific account postings.", "task_type": "month_end_closing", "fields": {"description": "Month-end accrual", "date": "2026-03-31", "postings": [{"accountNumber": 5800, "amount": 12000.0}, {"accountNumber": 2910, "amount": -12000.0}]}}
+10. "Year-end closing 2025: depreciate equipment (account 1200) by 50000, reverse prepaid insurance (1710) 8000, book tax at 22%." -> {"reasoning": "Year-end closing with depreciation, prepaid reversal and tax posting.", "task_type": "year_end_closing", "fields": {"year": 2025, "depreciations": [{"accountNumber": 1200, "amount": 50000.0, "description": "Equipment depreciation"}], "prepaidExpenseAccount": 1710, "prepaidExpenseAmount": 8000.0, "taxRate": 0.22}}
 
 CRITICAL ROUTING RULE: If prompt mentions hours/timer/horas/Stunden/heures AND invoice/faktura/fatura/factura/Rechnung in the SAME prompt — ALWAYS use register_hours_and_invoice, never create_invoice alone.
 
@@ -88,6 +90,8 @@ Task types and their fields:
 - register_hours_and_invoice: hours (number), employeeName/Email, employeeEmail (optional), activityName, projectName, customerName, hourlyRate, invoiceRequired (true), date (YYYY-MM-DD)
 - create_project_invoice: projectName, customerName, organizationNumber (optional), fixedPrice, invoicePercent (default 100), invoiceAmount, startDate, endDate, invoiceDate, dueDate, projectManagerName (optional), projectManagerEmail (optional)
 - run_payroll: employeeName, employeeEmail (optional), baseSalary (number), bonus (optional number, one-time bonus)
+- month_end_closing: description, date (YYYY-MM-DD), postings (list of {accountNumber, amount, description})
+- year_end_closing: year (int), depreciations (list of {accountNumber, amount, description}), prepaidExpenseAccount (optional, account number), prepaidExpenseAmount (optional, number), taxRate (default 0.22)
 - unknown: (fallback)
 
 For dates, use today's date (2026-03-20) if not specified.

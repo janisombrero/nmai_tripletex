@@ -66,6 +66,7 @@ class TaskHandler:
     def __init__(self, client: TripletexClient, files: list = None):
         self.client = client
         self._vat_cache: list | None = None
+        self._account_id_cache: dict = {}
         self.files = files or []  # raw file dicts from the request body
 
     def resolve_templates(self, obj, context):
@@ -241,6 +242,32 @@ class TaskHandler:
         status, data = self.client.get("/employee", params={"count": 5, "fields": "id"})
         if status == 200 and data.get("values"):
             return self._to_int(data["values"][0]["id"])
+        return None
+
+    def _find_account_id(self, number) -> int | None:
+        """Resolve a ledger account number (e.g. 7100) to the internal Tripletex integer ID.
+
+        Results are cached per request to avoid duplicate API calls when multiple
+        postings reference the same account number.
+        Returns None if the account cannot be found.
+        """
+        key = str(number)
+        if key in self._account_id_cache:
+            return self._account_id_cache[key]
+
+        status, data = self.client.get(
+            "/ledger/account", params={"number": key, "count": 1}
+        )
+        if status == 200:
+            values = data.get("values", [])
+            if values:
+                internal_id = self._to_int(values[0]["id"])
+                self._account_id_cache[key] = internal_id
+                logger.info("Resolved account number %s -> internal id=%s", key, internal_id)
+                return internal_id
+
+        logger.warning("Account number %s not found in ledger", key)
+        self._account_id_cache[key] = None
         return None
 
     def _ensure_customer(self, name: str, org_number: str = None):
@@ -1264,11 +1291,53 @@ class TaskHandler:
         total_debit = 0.0  # sum of all debit (positive) postings for auto AP generation
 
         for p in raw_postings:
-            acc_id = p.get("accountId") or p.get("account", {}).get("id")
+            # --- Resolve account to internal ID ---
+            # Agents may send account number (e.g. 7100) rather than internal ID.
+            # Accepted input shapes:
+            #   {"account": {"id": 123}}         — already an internal ID, use as-is
+            #   {"account": {"number": 7100}}     — account number, must resolve
+            #   {"accountId": 123}                — internal ID shorthand
+            #   {"accountNumber": 7100}           — account number shorthand
+            acc_obj = p.get("account", {})
+            acc_id = (
+                p.get("accountId")
+                or acc_obj.get("id")
+            )
+            acc_number = (
+                p.get("accountNumber")
+                or acc_obj.get("number")
+            )
+
+            # If we have only a number (or the "id" looks like a chart-of-accounts
+            # number rather than an internal ID — internal IDs are typically large),
+            # resolve it via the ledger API.
+            if acc_number and not acc_id:
+                acc_id = self._find_account_id(acc_number)
+                if acc_id is None:
+                    logger.warning(
+                        "Skipping posting: account number %s not found in ledger", acc_number
+                    )
+                    continue
+            elif acc_id and not acc_number:
+                # acc_id could itself be a chart-of-accounts number if it's ≤ 9999
+                # (internal IDs in Tripletex are usually much larger integers)
+                try:
+                    maybe_num = int(acc_id)
+                    if maybe_num <= 9999:
+                        resolved = self._find_account_id(maybe_num)
+                        if resolved is not None:
+                            acc_id = resolved
+                except (TypeError, ValueError):
+                    pass
+
             try:
                 acc_id_int = int(acc_id)
             except (TypeError, ValueError):
                 acc_id_int = None
+
+            if acc_id_int is None:
+                logger.warning("Skipping posting with unresolvable account (raw posting: %s)", p)
+                continue
 
             if acc_id_int in SYSTEM_ACCOUNTS:
                 continue
@@ -1816,6 +1885,94 @@ class TaskHandler:
 
         return {"success": True, "message": f"Project created id={project_id} and invoiced", "id": project_id}
 
+    def handle_year_end_closing(self, fields: dict) -> dict:
+        """Execute year-end closing by posting individual create_voucher calls:
+        1. One depreciation voucher per asset listed in `depreciations`.
+        2. A prepaid-expense reversal voucher if prepaidExpenseAccount is given.
+        3. A corporate-tax provision voucher derived from taxRate.
+        Each sub-voucher is passed to handle_create_voucher so account-number
+        resolution, system-account filtering, and auto-AP logic all apply.
+        """
+        year = int(fields.get("year") or TODAY[:4])
+        closing_date = f"{year}-12-31"
+        tax_rate = self._to_float(fields.get("taxRate") or 0.22)
+        results = []
+        total_expense = 0.0
+
+        # 1. Depreciation vouchers
+        for dep in fields.get("depreciations", []):
+            acc_num = dep.get("accountNumber") or dep.get("account")
+            amount = self._to_float(dep.get("amount") or 0)
+            if not acc_num or not amount:
+                continue
+            acc_id = self._find_account_id(acc_num)
+            if acc_id is None:
+                logger.warning("year_end_closing: cannot resolve depreciation account %s — skipping", acc_num)
+                continue
+            acc_dep_id = self._find_account_id(6010)  # 6010 = depreciation expense (standard)
+            dep_desc = dep.get("description") or f"Depreciation {year}"
+            postings = [
+                {"accountId": acc_dep_id or acc_id, "amount": amount,
+                 "description": dep_desc, "date": closing_date},
+                {"accountId": acc_id, "amount": -amount,
+                 "description": dep_desc, "date": closing_date},
+            ]
+            res = self.handle_create_voucher({
+                "date": closing_date,
+                "description": dep_desc,
+                "postings": postings,
+            })
+            results.append(res)
+            if res.get("success"):
+                total_expense += amount
+
+        # 2. Prepaid-expense reversal
+        prepaid_acc = fields.get("prepaidExpenseAccount")
+        prepaid_amt = self._to_float(fields.get("prepaidExpenseAmount") or 0)
+        if prepaid_acc and prepaid_amt:
+            pa_id = self._find_account_id(prepaid_acc)
+            exp_acc_id = self._find_account_id(6500) or self._find_account_id(5000)
+            if pa_id:
+                res = self.handle_create_voucher({
+                    "date": closing_date,
+                    "description": f"Prepaid expense reversal {year}",
+                    "postings": [
+                        {"accountId": exp_acc_id or pa_id, "amount": prepaid_amt,
+                         "description": f"Prepaid reversal {year}", "date": closing_date},
+                        {"accountId": pa_id, "amount": -prepaid_amt,
+                         "description": f"Prepaid reversal {year}", "date": closing_date},
+                    ],
+                })
+                results.append(res)
+                if res.get("success"):
+                    total_expense += prepaid_amt
+
+        # 3. Tax provision voucher (debit 8300 tax expense, credit 2500 tax payable)
+        if total_expense and tax_rate:
+            tax_amount = round(total_expense * tax_rate, 2)
+            tax_exp_id = self._find_account_id(8300)
+            tax_pay_id = self._find_account_id(2500)
+            if tax_exp_id and tax_pay_id:
+                res = self.handle_create_voucher({
+                    "date": closing_date,
+                    "description": f"Tax provision {year}",
+                    "postings": [
+                        {"accountId": tax_exp_id, "amount": tax_amount,
+                         "description": f"Tax provision {year}", "date": closing_date},
+                        {"accountId": tax_pay_id, "amount": -tax_amount,
+                         "description": f"Tax provision {year}", "date": closing_date},
+                    ],
+                })
+                results.append(res)
+
+        success = any(r.get("success") for r in results)
+        logger.info("TASK_RESULT: type=year_end_closing success=%s vouchers=%d", success, len(results))
+        return {
+            "success": success,
+            "message": f"Year-end closing {year}: {len(results)} voucher(s) posted",
+            "results": results,
+        }
+
     def handle_run_payroll(self, fields: dict) -> dict:
         """Run payroll for an employee: create a salary transaction + payslip."""
         import datetime as _dt
@@ -2025,10 +2182,9 @@ class TaskHandler:
                     
                     if "account" in posting and "number" in posting["account"] and "id" not in posting["account"]:
                         acc_num = posting["account"]["number"]
-                        logger.info("Agent fallback: auto-resolving account number %s", acc_num)
-                        s, d = self.client.get("/ledger/account", params={"number": acc_num, "count": 1})
-                        if s == 200 and d.get("values"):
-                            posting["account"] = {"id": self._to_int(d["values"][0]["id"])}
+                        resolved = self._find_account_id(acc_num)
+                        if resolved is not None:
+                            posting["account"] = {"id": resolved}
                         else:
                             logger.warning("Agent fallback: failed to resolve account number %s", acc_num)
 
@@ -2189,6 +2345,8 @@ class TaskHandler:
             "create_payroll_tax_reconciliation": self.handle_create_payroll_tax_reconciliation,
             "upload_document": self.handle_upload_document,
             "run_payroll": self.handle_run_payroll,
+            "month_end_closing": self.handle_create_voucher,
+            "year_end_closing": self.handle_year_end_closing,
         }
         handler = handler_map.get(task_type)
         if not handler:
